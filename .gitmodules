@@ -1,0 +1,3 @@
+[submodule "external/BaileysCSharp"]
+	path = external/BaileysCSharp
+	url = https://github.com/WhiskeySockets/BaileysCSharp

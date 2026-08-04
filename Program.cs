@@ -1,47 +1,27 @@
 using EventoWebNotificacoes;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Options;
 
-var builder = Host.CreateApplicationBuilder(args);
+var builder = WebApplication.CreateBuilder(args);
 
-builder.Configuration.AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
-
-builder.Services.Configure<NotificationWorkerOptions>(builder.Configuration.GetSection("Notification"));
-builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection("RabbitMq"));
+builder.Services.Configure<WhatsappSessionOptions>(builder.Configuration.GetSection("Whatsapp"));
+builder.Services.Configure<StorageOptions>(builder.Configuration.GetSection("Storage"));
 
 // Application services
 builder.Services.AddSingleton<TemplateRenderer>();
+builder.Services.AddSingleton<ConfigStore>();
+builder.Services.AddSingleton<ReadinessGate>();
 
-builder.Services.AddSingleton<INotificadorResolver>(provider =>
-{
-    var conf = provider.GetRequiredService<IOptions<NotificationWorkerOptions>>().Value;
-    var renderer = provider.GetRequiredService<TemplateRenderer>();
-    var notificadores = new Dictionary<EnumMeioNotificacao, INotificador>();
+builder.Services.AddSingleton<WhatsappConnectionService>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<WhatsappConnectionService>());
 
-    if (!string.IsNullOrWhiteSpace(conf.Email?.ApiUrl) &&
-        !string.IsNullOrWhiteSpace(conf.Email?.ApiKey) &&
-        !string.IsNullOrWhiteSpace(conf.Email?.FromAddress))
-    {
-        notificadores[EnumMeioNotificacao.EMail] = new NotificadorEmail(renderer, conf.Email);
-    }
+builder.Services.AddSingleton<INotificadorResolver, NotificadorResolver>();
 
-    if (!string.IsNullOrWhiteSpace(conf.Whatsapp?.ApiUrl) &&
-        !string.IsNullOrWhiteSpace(conf.Whatsapp?.ApiKey) &&
-        !string.IsNullOrWhiteSpace(conf.Whatsapp?.Instance))
-    {
-        notificadores[EnumMeioNotificacao.WhatsApp] = new NotificadorWhatsapp(renderer, conf.Whatsapp);
-    }
-
-    if (notificadores.Count == 0)
-        throw new InvalidOperationException("Nenhum meio de notificação configurado (Notification:Email / Notification:Whatsapp).");
-
-    return new NotificadorResolver(notificadores);
-});
-
-builder.Services.AddHostedService<RabbitMqRpcServerService>();
+builder.Services.AddSingleton<RabbitMqRpcServerService>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<RabbitMqRpcServerService>());
 
 var app = builder.Build();
+
+app.UseStaticFiles();
+app.MapGet("/", () => Results.Redirect("/admin.html"));
+app.MapConfiguracaoEndpoints();
 
 app.Run();
