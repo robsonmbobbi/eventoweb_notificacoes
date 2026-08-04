@@ -1,7 +1,6 @@
-using EventoWeb.Comum.Negocio.Entidades.Notificacoes;
-using Newtonsoft.Json;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 
 namespace EventoWebNotificacoes
 {
@@ -16,12 +15,12 @@ namespace EventoWebNotificacoes
             _config = config;
         }
 
-        public async Task EnviarAsync(MensagemNotificacao mensagem)
+        public async Task EnviarAsync(NotificacaoRequest notificacao)
         {
             // Render subject and body. If rendering fails, let exception propagate so the caller records it.
-            var assunto = mensagem.Modelo.Assunto ?? string.Empty;
-            var subject = _renderer.Render(assunto, mensagem.VariaveisJson);
-            var body = _renderer.Render(mensagem.Modelo.Mensagem, mensagem.VariaveisJson);
+            var assunto = notificacao.TemplateAssunto ?? string.Empty;
+            var subject = _renderer.Render(assunto, notificacao.DadosJson);
+            var body = _renderer.Render(notificacao.TemplateConteudo, notificacao.DadosJson);
 
             using var clientHttp = new HttpClient() { BaseAddress = new Uri(_config.ApiUrl) };
             clientHttp.DefaultRequestHeaders.Accept.Clear();
@@ -39,15 +38,15 @@ namespace EventoWebNotificacoes
                 {
                     new
                     {
-                        name = mensagem.Destinatario,
-                        email = mensagem.Destinatario
+                        name = notificacao.Destinatario,
+                        email = notificacao.Destinatario
                     }
                 },
                 subject,
                 htmlContent = body
             };
 
-            var content = new StringContent(JsonConvert.SerializeObject(payload), Encoding.UTF8, "application/json");
+            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
             var response = await clientHttp.PostAsync("v3/smtp/email", content);
 
             if (!response.IsSuccessStatusCode)
