@@ -1,4 +1,3 @@
 <Solution>
-  <Project Path="../eventoweb_comum_back/EventoWeb.Comum/EventoWeb.Comum.csproj" />
   <Project Path="EventoWebNotificacoes.csproj" />
 </Solution>

@@ -2,9 +2,6 @@ namespace EventoWebNotificacoes;
 
 public class NotificationWorkerOptions
 {
-    public string Meio { get; set; } = "EMail";
-    public int IntervalSeconds { get; set; } = 30;
-
     public EmailOptions? Email { get; set; }
     public WhatsappOptions? Whatsapp { get; set; }
 

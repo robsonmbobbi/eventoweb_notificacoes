@@ -1,10 +1,6 @@
-using System.Threading.Tasks;
-using EventoWeb.Comum.Negocio.Entidades.Notificacoes;
+namespace EventoWebNotificacoes;
 
-namespace EventoWebNotificacoes
+public interface INotificador
 {
-    public interface INotificador
-    {
-        Task EnviarAsync(MensagemNotificacao mensagem);
-    }
+    Task EnviarAsync(NotificacaoRequest notificacao);
 }
