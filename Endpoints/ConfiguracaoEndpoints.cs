@@ -98,6 +98,27 @@ public static class ConfiguracaoEndpoints
             return Results.Ok(new { ok });
         });
 
+        app.MapGet("/api/config/canais", (ConfigStore configStore) =>
+        {
+            var canais = configStore.Canais;
+            return Results.Ok(new CanaisConfigDto(canais.Email, canais.Whatsapp));
+        });
+
+        app.MapPut("/api/config/canais", (CanaisConfigInput input, ConfigStore configStore, ReadinessGate gate) =>
+        {
+            if (!input.Email && !input.Whatsapp)
+                return Results.BadRequest(new { erro = "Pelo menos um canal (Email ou WhatsApp) deve permanecer habilitado." });
+
+            configStore.SalvarCanais(new CanaisOptions { Email = input.Email, Whatsapp = input.Whatsapp });
+
+            // Reflete a mudança em /api/status já nesta resposta, sem depender só da reação
+            // assíncrona do WhatsappConnectionService a ConfigStore.CanaisChanged.
+            if (!input.Email) gate.AtualizarEmail(false);
+            if (!input.Whatsapp) gate.AtualizarWhatsapp(false);
+
+            return Results.Ok();
+        });
+
         app.MapGet("/api/whatsapp/status", (WhatsappConnectionService whatsapp) =>
             Results.Ok(BuildWhatsappStatusDto(whatsapp.CurrentState)));
 
@@ -130,3 +151,5 @@ public record RabbitMqConfigInput(string HostName, int Port, string UserName, st
 public record EmailConfigDto(string ApiUrl, bool TemApiKey, string FromAddress);
 public record EmailConfigInput(string ApiUrl, string? ApiKey, string FromAddress);
 public record WhatsappStatusDto(string Status, string? QrCodePngBase64, string? UltimoErro, DateTimeOffset UltimaAtualizacao);
+public record CanaisConfigDto(bool Email, bool Whatsapp);
+public record CanaisConfigInput(bool Email, bool Whatsapp);

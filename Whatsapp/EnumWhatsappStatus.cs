@@ -6,5 +6,6 @@ public enum EnumWhatsappStatus
     Conectando,
     AguardandoQrCode,
     Conectado,
+    Desabilitado,
     Erro
 }

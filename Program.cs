@@ -10,6 +10,9 @@ builder.Services.AddSingleton<TemplateRenderer>();
 builder.Services.AddSingleton<ConfigStore>();
 builder.Services.AddSingleton<ReadinessGate>();
 
+// Sempre hosted service: precisa rodar continuamente para poder ficar ocioso ("Desabilitado")
+// ou conectado, reagindo em tempo real a Canais:Whatsapp mudar via PUT /api/config/canais —
+// deixou de ser uma decisão fixada no boot (ver ConfigStore.Canais/CanaisChanged).
 builder.Services.AddSingleton<WhatsappConnectionService>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<WhatsappConnectionService>());
 

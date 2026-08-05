@@ -20,6 +20,7 @@ public class WhatsappConnectionService : BackgroundService
     private readonly ILogger<WhatsappConnectionService> _logger;
     private readonly WhatsappSessionOptions _options;
     private readonly ReadinessGate _gate;
+    private readonly ConfigStore _configStore;
 
     private static readonly TimeSpan MinRetryDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(30);
@@ -35,11 +36,22 @@ public class WhatsappConnectionService : BackgroundService
     private uint[]? _version;
     private string? _credsFilePath;
 
-    public WhatsappConnectionService(ILogger<WhatsappConnectionService> logger, IOptions<WhatsappSessionOptions> options, ReadinessGate gate)
+    // _connectionLost e _wake permitem que uma mudança de configuração (canal desabilitado/
+    // habilitado pela UI) interrompa imediatamente uma conexão ativa ou uma espera (ociosa ou
+    // de backoff), em vez de esperar o próximo ciclo natural do loop de reconexão.
+    private volatile TaskCompletionSource? _connectionLost;
+    private volatile TaskCompletionSource? _wake;
+
+    public WhatsappConnectionService(
+        ILogger<WhatsappConnectionService> logger,
+        IOptions<WhatsappSessionOptions> options,
+        ReadinessGate gate,
+        ConfigStore configStore)
     {
         _logger = logger;
         _options = options.Value;
         _gate = gate;
+        _configStore = configStore;
     }
 
     public WhatsappConnectionState CurrentState
@@ -54,38 +66,79 @@ public class WhatsappConnectionService : BackgroundService
         _version = await FetchLatestVersionAsync() ?? new SocketConfig().Version;
         _logger.LogInformation("Usando versão do protocolo WhatsApp Web {Version}", string.Join('.', _version));
 
-        var retryDelay = MinRetryDelay;
-
-        while (!stoppingToken.IsCancellationRequested)
+        _configStore.CanaisChanged += OnCanaisChanged;
+        try
         {
-            try
+            var retryDelay = MinRetryDelay;
+
+            while (!stoppingToken.IsCancellationRequested)
             {
-                await RunOnceAsync(stoppingToken);
-                retryDelay = MinRetryDelay;
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Conexão com o WhatsApp perdida. Tentando novamente em {Delay}s.", retryDelay.TotalSeconds);
-                SetState(EnumWhatsappStatus.Conectando, erro: ex.Message);
+                if (!_configStore.Canais.Whatsapp)
+                {
+                    SetState(EnumWhatsappStatus.Desabilitado);
+                    await AguardarOuAcordarAsync(Timeout.InfiniteTimeSpan, stoppingToken, sairSeVerdadeiro: () => _configStore.Canais.Whatsapp);
+                    retryDelay = MinRetryDelay;
+                    continue;
+                }
 
                 try
                 {
-                    await Task.Delay(retryDelay, stoppingToken);
+                    await RunOnceAsync(stoppingToken);
+                    retryDelay = MinRetryDelay;
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
                     break;
                 }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Conexão com o WhatsApp perdida. Tentando novamente em {Delay}s.", retryDelay.TotalSeconds);
+                    SetState(EnumWhatsappStatus.Conectando, erro: ex.Message);
 
-                retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, MaxRetryDelay.TotalSeconds));
+                    await AguardarOuAcordarAsync(retryDelay, stoppingToken);
+                    if (stoppingToken.IsCancellationRequested)
+                        break;
+
+                    retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, MaxRetryDelay.TotalSeconds));
+                }
             }
+        }
+        finally
+        {
+            _configStore.CanaisChanged -= OnCanaisChanged;
         }
 
         SetState(EnumWhatsappStatus.Desconectado);
+    }
+
+    // Disparado por ConfigStore.SalvarCanais (PUT /api/config/canais), possivelmente numa
+    // thread de requisição HTTP diferente da thread do loop de reconexão.
+    private void OnCanaisChanged(CanaisOptions canais)
+    {
+        _wake?.TrySetResult();
+        if (!canais.Whatsapp)
+            _connectionLost?.TrySetResult();
+    }
+
+    // Espera interrompível: checa a condição de saída antes de esperar (evita perder um
+    // OnCanaisChanged dispersado entre a checagem do chamador e o início da espera) e corre o
+    // delay contra um "acordar" externo, sem precisar aguardar o delay inteiro.
+    private async Task AguardarOuAcordarAsync(TimeSpan delay, CancellationToken stoppingToken, Func<bool>? sairSeVerdadeiro = null)
+    {
+        var wake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _wake = wake;
+        try
+        {
+            if (sairSeVerdadeiro?.Invoke() == true)
+                return;
+
+            using var registration = stoppingToken.Register(() => wake.TrySetResult());
+            await Task.WhenAny(Task.Delay(delay, stoppingToken), wake.Task);
+        }
+        finally
+        {
+            _wake = null;
+        }
     }
 
     // Cada tentativa usa uma instância nova de WASocket: reaproveitar a mesma instância entre
@@ -109,6 +162,7 @@ public class WhatsappConnectionService : BackgroundService
         _socket = socket;
 
         var connectionLost = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _connectionLost = connectionLost;
         var loggedOut = false;
 
         socket.EV.Auth.Update += (_, e) => OnAuthUpdate(config, e);
@@ -119,6 +173,7 @@ public class WhatsappConnectionService : BackgroundService
 
         using var cancellationRegistration = stoppingToken.Register(() => connectionLost.TrySetResult());
         await connectionLost.Task;
+        _connectionLost = null;
 
         socket.EndConnection(destroyStore: loggedOut);
 

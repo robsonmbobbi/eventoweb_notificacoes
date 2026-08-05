@@ -8,10 +8,12 @@ public class ConfigStore : IDisposable
     private readonly LiteDatabase _db;
     private readonly ILiteCollection<RabbitMqOptions> _rabbitMqCollection;
     private readonly ILiteCollection<NotificationWorkerOptions.EmailOptions> _emailCollection;
+    private readonly ILiteCollection<CanaisOptions> _canaisCollection;
 
     private readonly object _lock = new();
     private RabbitMqOptions _rabbitMq;
     private NotificationWorkerOptions.EmailOptions? _email;
+    private CanaisOptions _canais;
 
     public ConfigStore(IOptions<StorageOptions> storageOptions, IConfiguration configuration)
     {
@@ -23,9 +25,11 @@ public class ConfigStore : IDisposable
         _db = new LiteDatabase(path);
         _rabbitMqCollection = _db.GetCollection<RabbitMqOptions>("rabbitmq");
         _emailCollection = _db.GetCollection<NotificationWorkerOptions.EmailOptions>("email");
+        _canaisCollection = _db.GetCollection<CanaisOptions>("canais");
 
         _rabbitMq = _rabbitMqCollection.FindAll().FirstOrDefault() ?? SeedRabbitMq(configuration);
         _email = _emailCollection.FindAll().FirstOrDefault() ?? SeedEmail(configuration);
+        _canais = _canaisCollection.FindAll().FirstOrDefault() ?? SeedCanais(configuration);
     }
 
     public RabbitMqOptions RabbitMq
@@ -38,7 +42,13 @@ public class ConfigStore : IDisposable
         get { lock (_lock) return _email; }
     }
 
+    public CanaisOptions Canais
+    {
+        get { lock (_lock) return _canais; }
+    }
+
     public event Action? ConfigChanged;
+    public event Action<CanaisOptions>? CanaisChanged;
 
     public void SalvarRabbitMq(RabbitMqOptions options)
     {
@@ -62,6 +72,18 @@ public class ConfigStore : IDisposable
         ConfigChanged?.Invoke();
     }
 
+    public void SalvarCanais(CanaisOptions options)
+    {
+        lock (_lock)
+        {
+            _canaisCollection.DeleteAll();
+            _canaisCollection.Insert(options);
+            _canais = options;
+        }
+        ConfigChanged?.Invoke();
+        CanaisChanged?.Invoke(options);
+    }
+
     private RabbitMqOptions SeedRabbitMq(IConfiguration configuration)
     {
         var seed = new RabbitMqOptions();
@@ -82,6 +104,24 @@ public class ConfigStore : IDisposable
             return null;
 
         _emailCollection.Insert(seed);
+        return seed;
+    }
+
+    private CanaisOptions SeedCanais(IConfiguration configuration)
+    {
+        var seed = new CanaisOptions();
+        configuration.GetSection("Canais").Bind(seed);
+
+        // Só bloqueia no seed inicial (banco vazio); depois do primeiro boot, quem impede os
+        // dois canais desligados é o PUT /api/config/canais (validação em runtime).
+        if (!seed.Email && !seed.Whatsapp)
+        {
+            throw new InvalidOperationException(
+                "Configuração inicial inválida: nenhum canal habilitado em Canais:Email/Canais:Whatsapp " +
+                "no appsettings.json usado para o seed inicial. Habilite pelo menos um.");
+        }
+
+        _canaisCollection.Insert(seed);
         return seed;
     }
 

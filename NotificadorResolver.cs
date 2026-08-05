@@ -11,7 +11,10 @@ public sealed class NotificadorResolver : INotificadorResolver
     private readonly TemplateRenderer _renderer;
     private readonly WhatsappConnectionService _whatsappConnectionService;
 
-    public NotificadorResolver(ConfigStore configStore, TemplateRenderer renderer, WhatsappConnectionService whatsappConnectionService)
+    public NotificadorResolver(
+        ConfigStore configStore,
+        TemplateRenderer renderer,
+        WhatsappConnectionService whatsappConnectionService)
     {
         _configStore = configStore;
         _renderer = renderer;
@@ -21,12 +24,15 @@ public sealed class NotificadorResolver : INotificadorResolver
     public INotificador Resolver(EnumMeioNotificacao meio) => meio switch
     {
         EnumMeioNotificacao.EMail => ResolverEmail(),
-        EnumMeioNotificacao.WhatsApp => new NotificadorWhatsapp(_renderer, _whatsappConnectionService),
+        EnumMeioNotificacao.WhatsApp => ResolverWhatsapp(),
         _ => throw new NotSupportedException($"Meio de notificação não configurado neste worker: {meio}")
     };
 
     private INotificador ResolverEmail()
     {
+        if (!_configStore.Canais.Email)
+            throw new NotSupportedException("Meio de notificação não configurado neste worker: EMail");
+
         var email = _configStore.Email;
         if (email is null ||
             string.IsNullOrWhiteSpace(email.ApiUrl) ||
@@ -37,5 +43,13 @@ public sealed class NotificadorResolver : INotificadorResolver
         }
 
         return new NotificadorEmail(_renderer, email);
+    }
+
+    private INotificador ResolverWhatsapp()
+    {
+        if (!_configStore.Canais.Whatsapp)
+            throw new NotSupportedException("Meio de notificação não configurado neste worker: WhatsApp");
+
+        return new NotificadorWhatsapp(_renderer, _whatsappConnectionService);
     }
 }

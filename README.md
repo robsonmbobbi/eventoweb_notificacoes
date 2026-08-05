@@ -18,9 +18,9 @@ no protocolo multi-device do WhatsApp Web via WebSocket, sem gateway intermediá
 ## Configuração
 
 O serviço só começa a consumir a fila do RabbitMQ quando: (1) a configuração do RabbitMQ
-está validada, **e** (2) pelo menos um notificador (Email ou WhatsApp) também está
-validado. Enquanto isso não acontece, o processo fica de pé servindo só a interface de
-configuração.
+está validada, **e** (2) todos os canais habilitados nesta instância (`Canais:Email` /
+`Canais:Whatsapp`, ver abaixo) também estão validados. Enquanto isso não acontece, o
+processo fica de pé servindo só a interface de configuração.
 
 **Primeira execução**: abra `http://localhost:<porta>/` (redireciona para `/admin.html`) e
 preencha RabbitMQ, Email e/ou escaneie o QR Code do WhatsApp por lá. Não é mais necessário
@@ -51,14 +51,58 @@ uma única vez. Depois disso, edições passam a ser feitas pela UI — reeditar
   },
   "Storage": {
     "ConfigDbPath": "./data/notificacoes-config.db"
+  },
+  "Canais": {
+    "Email": true,
+    "Whatsapp": true
   }
 }
 ```
 
 `Whatsapp:SessionName` e `Storage:ConfigDbPath` são exceção: continuam vindo só do
-`appsettings.json`/variáveis de ambiente (são caminhos de infraestrutura, não algo que se
-preenche num formulário — não há credenciais para digitar no WhatsApp além de escanear o
-QR).
+`appsettings.json`/variáveis de ambiente, nunca da UI/LiteDB (são decisões de
+infraestrutura/deploy, não algo que se preenche num formulário). `Canais` **não** é
+exceção — segue o mesmo padrão de seed do RabbitMq/Email descrito acima (ver a seguir).
+
+### Canais (`Canais:Email` / `Canais:Whatsapp`)
+
+Controla quais canais este processo serve. Editável pela seção "Canais habilitados" em
+`/admin.html` (`GET`/`PUT /api/config/canais`) — **a mudança tem efeito imediato, sem
+precisar reiniciar o processo**: desmarcar WhatsApp derruba a conexão/socket do
+BaileysCSharp na hora; marcar volta a tentar conectar na hora. A sessão do WhatsApp
+(`creds.json`) é preservada ao desabilitar — religar reconecta sem pedir um novo QR Code;
+só o logout manual ("Sair / trocar número") ou um logout remoto pelo próprio WhatsApp
+apagam as credenciais. Enquanto o canal está desabilitado, o status mostrado é
+`Desabilitado` (distinto de `Desconectado`, que significa "tentando reconectar").
+
+`appsettings.json`'s `Canais` (default `{ "Email": true, "Whatsapp": true }` se a seção
+não existir) serve só de **seed no primeiro boot** — depois disso, edições passam a ser
+feitas pela UI, igual RabbitMq/Email. Se os dois estiverem `false` nesse seed inicial, o
+processo falha ao subir com uma mensagem de erro clara; depois do primeiro boot, tentar
+desabilitar os dois pela UI é rejeitado com `400` (pelo menos um precisa continuar
+habilitado).
+
+Um pedido de notificação para um canal desabilitado nesta instância não derruba o
+processo: a resposta RPC volta com `Sucesso: false` e
+`MensagemErro: "Meio de notificação não configurado neste worker: ..."`.
+
+**Deploy dividido por máquina** (ex.: WhatsApp numa máquina com mais memória para o socket
+do BaileysCSharp, Email numa máquina com IP fixo para o allowlist do provedor): suba cada
+instância com o `Canais` inicial já correto (seed) ou ajuste pela UI logo após o primeiro
+boot, e configure `RabbitMq:RequestQueueName` com uma fila própria por máquina, por
+exemplo:
+
+- Máquina WhatsApp: canal Email desabilitado, `RabbitMq:RequestQueueName=notificacoes.enviar.whatsapp`.
+- Máquina Email: canal WhatsApp desabilitado, `RabbitMq:RequestQueueName=notificacoes.enviar.email`.
+
+Como a fila é uma única string plana (`RabbitMq:RequestQueueName`) e ambas as instâncias
+rodam o mesmo código, cada uma deve apontar para uma fila própria — do contrário, com as
+duas consumindo a mesma fila, o RabbitMQ pode entregar uma mensagem de WhatsApp para a
+instância de Email (ou vice-versa) por round-robin entre consumidores concorrentes.
+**Rotear cada mensagem para a fila do canal certo (pelo campo `meio`) é responsabilidade
+de quem publica** (fora deste repositório) — este serviço não declara topologia nem faz
+esse roteamento entre filas; ele só se defende de receber a mensagem errada respondendo
+com erro via RPC, como descrito acima.
 
 ### Volumes persistentes (deploy)
 

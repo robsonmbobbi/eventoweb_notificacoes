@@ -10,6 +10,7 @@
   h2 { font-size: 1rem; margin-top: 0; }
   label { display: block; margin-top: 0.6rem; font-size: 0.85rem; }
   input { width: 100%; box-sizing: border-box; padding: 0.4rem; margin-top: 0.2rem; }
+  input[type=checkbox] { width: auto; box-sizing: content-box; display: inline-block; margin: 0 0.4rem 0 0; padding: 0; vertical-align: middle; }
   button { margin-top: 0.8rem; margin-right: 0.5rem; padding: 0.4rem 0.9rem; cursor: pointer; }
   .msg { margin-top: 0.6rem; font-size: 0.85rem; }
   .ok { color: #0a7a26; }
@@ -23,6 +24,16 @@
 <body>
 <h1>EventoWeb Notificações — Configuração</h1>
 <div id="banner">Carregando status...</div>
+
+<section id="section-canais">
+  <h2>Canais habilitados</h2>
+  <form id="form-canais">
+    <label style="display:flex; align-items:center;"><input type="checkbox" name="email"> Email</label>
+    <label style="display:flex; align-items:center;"><input type="checkbox" name="whatsapp"> WhatsApp</label>
+    <button type="submit">Salvar</button>
+    <div class="msg" id="msg-canais"></div>
+  </form>
+</section>
 
 <section>
   <h2>RabbitMQ</h2>
@@ -41,7 +52,7 @@
   </form>
 </section>
 
-<section>
+<section id="section-email">
   <h2>Email</h2>
   <form id="form-email">
     <label>URL da API <input name="apiUrl" required></label>
@@ -53,7 +64,7 @@
   </form>
 </section>
 
-<section>
+<section id="section-whatsapp">
   <h2>WhatsApp</h2>
   <p>Status: <strong id="whatsapp-status">-</strong></p>
   <img id="qr" style="display:none" alt="QR Code do WhatsApp" />
@@ -82,6 +93,30 @@ async function carregarEmail() {
   f.fromAddress.value = r.fromAddress;
 }
 
+async function carregarCanais() {
+  const r = await fetch('/api/config/canais').then(r => r.json());
+  const f = document.getElementById('form-canais');
+  f.email.checked = r.email;
+  f.whatsapp.checked = r.whatsapp;
+}
+
+document.getElementById('form-canais').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const msg = document.getElementById('msg-canais');
+  const body = { email: f.email.checked, whatsapp: f.whatsapp.checked };
+  const resp = await fetch('/api/config/canais', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!resp.ok) {
+    const erro = await resp.json().catch(() => ({}));
+    msg.className = 'msg erro';
+    msg.textContent = erro.erro || 'Falha ao salvar.';
+    return;
+  }
+  msg.className = 'msg ok';
+  msg.textContent = 'Salvo.';
+  await atualizarTudo();
+});
+
 document.getElementById('form-rabbitmq').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target;
@@ -106,7 +141,7 @@ document.getElementById('btn-rabbitmq-validate').addEventListener('click', async
   const r = await fetch('/api/config/rabbitmq/validate', { method: 'POST' }).then(r => r.json());
   msg.className = 'msg ' + (r.ok ? 'ok' : 'erro');
   msg.textContent = r.ok ? 'Conexão OK.' : ('Falhou: ' + r.erro);
-  atualizarStatus();
+  atualizarTudo();
 });
 
 document.getElementById('btn-rabbitmq-reconnect').addEventListener('click', async () => {
@@ -129,7 +164,7 @@ document.getElementById('btn-email-validate').addEventListener('click', async ()
   const r = await fetch('/api/config/email/validate', { method: 'POST' }).then(r => r.json());
   msg.className = 'msg ' + (r.ok ? 'ok' : 'erro');
   msg.textContent = r.ok ? 'Configuração válida.' : 'Campos incompletos.';
-  atualizarStatus();
+  atualizarTudo();
 });
 
 document.getElementById('btn-whatsapp-logout').addEventListener('click', async () => {
@@ -149,27 +184,45 @@ async function atualizarWhatsapp() {
   }
 }
 
-async function atualizarStatus() {
-  const r = await fetch('/api/status').then(r => r.json());
+function aplicarBanner(status) {
   const banner = document.getElementById('banner');
-  if (r.pronto) {
+  if (status.pronto) {
     banner.className = 'pronto';
     banner.textContent = 'Pronto: o serviço está consumindo a fila de notificações.';
   } else {
+    const partes = ['RabbitMQ: ' + (status.rabbitMqValidado ? 'OK' : 'pendente')];
+    if (status.emailHabilitado) partes.push('Email: ' + (status.emailValidado ? 'OK' : 'pendente'));
+    if (status.whatsappHabilitado) partes.push('WhatsApp: ' + (status.whatsappValidado ? 'OK' : 'pendente'));
     banner.className = 'aguardando';
-    banner.textContent = 'Aguardando configuração — RabbitMQ: ' + (r.rabbitMqValidado ? 'OK' : 'pendente') +
-      ' | Email: ' + (r.emailValidado ? 'OK' : 'pendente') +
-      ' | WhatsApp: ' + (r.whatsappValidado ? 'OK' : 'pendente');
+    banner.textContent = 'Aguardando configuração — ' + partes.join(' | ');
   }
+}
+
+// A habilitação de canal pode mudar a qualquer momento (outra aba, outra pessoa), então cada
+// tick re-lê /api/status e reaplica a visibilidade das seções, em vez de decidir isso só uma
+// vez no carregamento da página.
+let emailVisivelAnterior = false;
+
+async function atualizarTudo() {
+  const status = await fetch('/api/status').then(r => r.json());
+
+  document.getElementById('section-email').style.display = status.emailHabilitado ? '' : 'none';
+  document.getElementById('section-whatsapp').style.display = status.whatsappHabilitado ? '' : 'none';
+  aplicarBanner(status);
+
+  if (status.emailHabilitado && !emailVisivelAnterior) await carregarEmail();
+  emailVisivelAnterior = status.emailHabilitado;
+
+  if (status.whatsappHabilitado) await atualizarWhatsapp();
+
+  return status;
 }
 
 async function iniciar() {
   await carregarRabbitMq();
-  await carregarEmail();
-  await atualizarStatus();
-  await atualizarWhatsapp();
-  setInterval(atualizarWhatsapp, 2000);
-  setInterval(atualizarStatus, 3000);
+  await carregarCanais();
+  await atualizarTudo();
+  setInterval(atualizarTudo, 3000);
 }
 
 iniciar();
