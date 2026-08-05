@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8" />
+<title>EventoWeb Notificações — Configuração</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; }
+  section { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; }
+  h2 { font-size: 1rem; margin-top: 0; }
+  label { display: block; margin-top: 0.6rem; font-size: 0.85rem; }
+  input { width: 100%; box-sizing: border-box; padding: 0.4rem; margin-top: 0.2rem; }
+  input[type=checkbox] { width: auto; box-sizing: content-box; display: inline-block; margin: 0 0.4rem 0 0; padding: 0; vertical-align: middle; }
+  button { margin-top: 0.8rem; margin-right: 0.5rem; padding: 0.4rem 0.9rem; cursor: pointer; }
+  .msg { margin-top: 0.6rem; font-size: 0.85rem; }
+  .ok { color: #0a7a26; }
+  .erro { color: #b00020; }
+  #banner { padding: 0.7rem 1rem; border-radius: 8px; margin-bottom: 1.5rem; font-weight: 600; }
+  #banner.pronto { background: #e3f7e8; color: #0a7a26; }
+  #banner.aguardando { background: #fff4e0; color: #8a5a00; }
+  #qr { margin-top: 0.6rem; max-width: 220px; display: block; }
+</style>
+</head>
+<body>
+<h1>EventoWeb Notificações — Configuração</h1>
+<div id="banner">Carregando status...</div>
+
+<section id="section-canais">
+  <h2>Canais habilitados</h2>
+  <form id="form-canais">
+    <label style="display:flex; align-items:center;"><input type="checkbox" name="email"> Email</label>
+    <label style="display:flex; align-items:center;"><input type="checkbox" name="whatsapp"> WhatsApp</label>
+    <button type="submit">Salvar</button>
+    <div class="msg" id="msg-canais"></div>
+  </form>
+</section>
+
+<section>
+  <h2>RabbitMQ</h2>
+  <form id="form-rabbitmq">
+    <label>Host <input name="hostName" required></label>
+    <label>Porta <input name="port" type="number" required></label>
+    <label>Usuário <input name="userName" required></label>
+    <label>Senha (deixe em branco para manter a atual) <input name="password" type="password"></label>
+    <label>Virtual Host <input name="virtualHost" required></label>
+    <label>Fila <input name="requestQueueName" required></label>
+    <label>Prefetch <input name="prefetchCount" type="number" required></label>
+    <button type="submit">Salvar</button>
+    <button type="button" id="btn-rabbitmq-validate">Testar conexão</button>
+    <button type="button" id="btn-rabbitmq-reconnect">Forçar reconexão</button>
+    <div class="msg" id="msg-rabbitmq"></div>
+  </form>
+</section>
+
+<section id="section-email">
+  <h2>Email</h2>
+  <form id="form-email">
+    <label>URL da API <input name="apiUrl" required></label>
+    <label>Chave da API (deixe em branco para manter a atual) <input name="apiKey" type="password"></label>
+    <label>Endereço remetente <input name="fromAddress" required></label>
+    <button type="submit">Salvar</button>
+    <button type="button" id="btn-email-validate">Testar</button>
+    <div class="msg" id="msg-email"></div>
+  </form>
+</section>
+
+<section id="section-whatsapp">
+  <h2>WhatsApp</h2>
+  <p>Status: <strong id="whatsapp-status">-</strong></p>
+  <img id="qr" style="display:none" alt="QR Code do WhatsApp" />
+  <div class="msg erro" id="whatsapp-erro"></div>
+  <button type="button" id="btn-whatsapp-logout">Sair / trocar número</button>
+</section>
+
+<script>
+async function carregarRabbitMq() {
+  const r = await fetch('/api/config/rabbitmq').then(r => r.json());
+  const f = document.getElementById('form-rabbitmq');
+  f.hostName.value = r.hostName;
+  f.port.value = r.port;
+  f.userName.value = r.userName;
+  f.password.placeholder = r.temSenha ? '••••••••' : '';
+  f.virtualHost.value = r.virtualHost;
+  f.requestQueueName.value = r.requestQueueName;
+  f.prefetchCount.value = r.prefetchCount;
+}
+
+async function carregarEmail() {
+  const r = await fetch('/api/config/email').then(r => r.json());
+  const f = document.getElementById('form-email');
+  f.apiUrl.value = r.apiUrl;
+  f.apiKey.placeholder = r.temApiKey ? '••••••••' : '';
+  f.fromAddress.value = r.fromAddress;
+}
+
+async function carregarCanais() {
+  const r = await fetch('/api/config/canais').then(r => r.json());
+  const f = document.getElementById('form-canais');
+  f.email.checked = r.email;
+  f.whatsapp.checked = r.whatsapp;
+}
+
+document.getElementById('form-canais').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const msg = document.getElementById('msg-canais');
+  const body = { email: f.email.checked, whatsapp: f.whatsapp.checked };
+  const resp = await fetch('/api/config/canais', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!resp.ok) {
+    const erro = await resp.json().catch(() => ({}));
+    msg.className = 'msg erro';
+    msg.textContent = erro.erro || 'Falha ao salvar.';
+    return;
+  }
+  msg.className = 'msg ok';
+  msg.textContent = 'Salvo.';
+  await atualizarTudo();
+});
+
+document.getElementById('form-rabbitmq').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const body = {
+    hostName: f.hostName.value,
+    port: Number(f.port.value),
+    userName: f.userName.value,
+    password: f.password.value || null,
+    virtualHost: f.virtualHost.value,
+    requestQueueName: f.requestQueueName.value,
+    prefetchCount: Number(f.prefetchCount.value)
+  };
+  await fetch('/api/config/rabbitmq', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  f.password.value = '';
+  document.getElementById('msg-rabbitmq').textContent = 'Salvo.';
+  await carregarRabbitMq();
+});
+
+document.getElementById('btn-rabbitmq-validate').addEventListener('click', async () => {
+  const msg = document.getElementById('msg-rabbitmq');
+  msg.textContent = 'Testando...';
+  const r = await fetch('/api/config/rabbitmq/validate', { method: 'POST' }).then(r => r.json());
+  msg.className = 'msg ' + (r.ok ? 'ok' : 'erro');
+  msg.textContent = r.ok ? 'Conexão OK.' : ('Falhou: ' + r.erro);
+  atualizarTudo();
+});
+
+document.getElementById('btn-rabbitmq-reconnect').addEventListener('click', async () => {
+  await fetch('/api/config/rabbitmq/reconnect', { method: 'POST' });
+  document.getElementById('msg-rabbitmq').textContent = 'Reconexão solicitada.';
+});
+
+document.getElementById('form-email').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const body = { apiUrl: f.apiUrl.value, apiKey: f.apiKey.value || null, fromAddress: f.fromAddress.value };
+  await fetch('/api/config/email', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  f.apiKey.value = '';
+  document.getElementById('msg-email').textContent = 'Salvo.';
+  await carregarEmail();
+});
+
+document.getElementById('btn-email-validate').addEventListener('click', async () => {
+  const msg = document.getElementById('msg-email');
+  const r = await fetch('/api/config/email/validate', { method: 'POST' }).then(r => r.json());
+  msg.className = 'msg ' + (r.ok ? 'ok' : 'erro');
+  msg.textContent = r.ok ? 'Configuração válida.' : 'Campos incompletos.';
+  atualizarTudo();
+});
+
+document.getElementById('btn-whatsapp-logout').addEventListener('click', async () => {
+  await fetch('/api/whatsapp/logout', { method: 'POST' });
+});
+
+async function atualizarWhatsapp() {
+  const r = await fetch('/api/whatsapp/status').then(r => r.json());
+  document.getElementById('whatsapp-status').textContent = r.status;
+  document.getElementById('whatsapp-erro').textContent = r.ultimoErro || '';
+  const qr = document.getElementById('qr');
+  if (r.qrCodePngBase64) {
+    qr.src = 'data:image/png;base64,' + r.qrCodePngBase64;
+    qr.style.display = 'block';
+  } else {
+    qr.style.display = 'none';
+  }
+}
+
+function aplicarBanner(status) {
+  const banner = document.getElementById('banner');
+  if (status.pronto) {
+    banner.className = 'pronto';
+    banner.textContent = 'Pronto: o serviço está consumindo a fila de notificações.';
+  } else {
+    const partes = ['RabbitMQ: ' + (status.rabbitMqValidado ? 'OK' : 'pendente')];
+    if (status.emailHabilitado) partes.push('Email: ' + (status.emailValidado ? 'OK' : 'pendente'));
+    if (status.whatsappHabilitado) partes.push('WhatsApp: ' + (status.whatsappValidado ? 'OK' : 'pendente'));
+    banner.className = 'aguardando';
+    banner.textContent = 'Aguardando configuração — ' + partes.join(' | ');
+  }
+}
+
+// A habilitação de canal pode mudar a qualquer momento (outra aba, outra pessoa), então cada
+// tick re-lê /api/status e reaplica a visibilidade das seções, em vez de decidir isso só uma
+// vez no carregamento da página.
+let emailVisivelAnterior = false;
+
+async function atualizarTudo() {
+  const status = await fetch('/api/status').then(r => r.json());
+
+  document.getElementById('section-email').style.display = status.emailHabilitado ? '' : 'none';
+  document.getElementById('section-whatsapp').style.display = status.whatsappHabilitado ? '' : 'none';
+  aplicarBanner(status);
+
+  if (status.emailHabilitado && !emailVisivelAnterior) await carregarEmail();
+  emailVisivelAnterior = status.emailHabilitado;
+
+  if (status.whatsappHabilitado) await atualizarWhatsapp();
+
+  return status;
+}
+
+async function iniciar() {
+  await carregarRabbitMq();
+  await carregarCanais();
+  await atualizarTudo();
+  setInterval(atualizarTudo, 3000);
+}
+
+iniciar();
+</script>
+</body>
+</html>
