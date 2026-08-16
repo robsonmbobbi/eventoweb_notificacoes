@@ -84,7 +84,11 @@ public class RabbitMqRpcServerService : BackgroundService
         };
 
         await using var connection = await factory.CreateConnectionAsync(stoppingToken);
-        await using var channel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
+        await using var channel = await connection.CreateChannelAsync(
+            new CreateChannelOptions(
+                publisherConfirmationsEnabled: true,
+                publisherConfirmationTrackingEnabled: true),
+            cancellationToken: stoppingToken);
 
         // A fila é criada/gerenciada pela infra; este serviço apenas consome, não declara topologia.
         await channel.BasicQosAsync(
@@ -143,26 +147,37 @@ public class RabbitMqRpcServerService : BackgroundService
             _logger.LogError(ex, "Erro ao processar notificação Id={Id}", request?.Id);
             response = new NotificacaoResponse { Id = request?.Id ?? Guid.Empty, Sucesso = false, MensagemErro = ex.Message };
         }
-        finally
-        {
-            if (!string.IsNullOrEmpty(replyTo))
-            {
-                var replyProps = new BasicProperties { CorrelationId = correlationId };
-                var body = JsonSerializer.SerializeToUtf8Bytes(response);
 
-                await channel.BasicPublishAsync(
-                    exchange: string.Empty,
-                    routingKey: replyTo,
-                    mandatory: false,
-                    basicProperties: replyProps,
-                    body: body);
-            }
-            else
-            {
-                _logger.LogWarning("Mensagem sem ReplyTo recebida, não é possível responder. Id={Id}", request?.Id);
-            }
+        if (string.IsNullOrEmpty(replyTo))
+        {
+            _logger.LogWarning("Mensagem sem ReplyTo recebida, não é possível responder. Id={Id}", request?.Id);
+            await channel.BasicAckAsync(ea.DeliveryTag, multiple: false);
+            return;
+        }
+
+        // O cliente é responsável por declarar previamente uma fila própria, durável e de nome
+        // fixo por instância, e informá-la em ReplyTo (não mais o amq.rabbitmq.reply-to efêmero).
+        // Com publisher confirms + mandatory:true, BasicPublishAsync lança PublishException se a
+        // resposta for nack'd ou não puder ser roteada (ex.: fila do cliente não existe) — só
+        // confirmamos o pedido original (ack) depois de ter certeza de que a resposta foi
+        // persistida pelo broker.
+        try
+        {
+            var replyProps = new BasicProperties { CorrelationId = correlationId, Persistent = true };
+            var body = JsonSerializer.SerializeToUtf8Bytes(response);
+
+            await channel.BasicPublishAsync(
+                exchange: string.Empty,
+                routingKey: replyTo,
+                mandatory: true,
+                basicProperties: replyProps,
+                body: body);
 
             await channel.BasicAckAsync(ea.DeliveryTag, multiple: false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Falha ao publicar resposta em ReplyTo='{ReplyTo}' para Id={Id}; pedido não será ack'd e será reprocessado.", replyTo, response.Id);
         }
     }
 }

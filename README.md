@@ -165,8 +165,46 @@ Resposta (`NotificacaoResponse`), publicada em `ReplyTo` com o mesmo `Correlatio
 }
 ```
 
-Recomenda-se que o cliente RPC use *direct reply-to* do RabbitMQ
-(`ReplyTo = "amq.rabbitmq.reply-to"`) — não é necessário declarar fila própria.
+### Entrega confiável e assíncrona da resposta
+
+**Não use mais o `amq.rabbitmq.reply-to`** (direct reply-to). Ele é uma
+pseudo-fila atrelada à conexão AMQP do cliente no momento exato da resposta —
+se o cliente cair entre publicar o pedido e o servidor responder, a resposta
+é perdida para sempre, sem fila real e sem redelivery.
+
+Em vez disso, o cliente deve:
+
+1. **Declarar sua própria fila de resposta**, durável e com **nome fixo por
+   instância** (não uma fila nova a cada mensagem) — por exemplo
+   `notificacoes.status.<nome-da-instancia-cliente>` — com
+   `durable: true, exclusive: false, autoDelete: false`. A declaração deve
+   acontecer na subida da instância cliente, antes de publicar qualquer
+   pedido; é idempotente (`queue.declare` com os mesmos argumentos é um
+   no-op).
+2. Publicar o pedido com `ReplyTo` apontando para essa fila e `CorrelationId`
+   preenchido — como essa fila é compartilhada entre todos os pedidos em voo
+   da mesma instância, o `CorrelationId` é **obrigatório na prática** para
+   casar cada resposta com o pedido certo.
+3. Consumir essa fila de forma duradoura (ack manual só depois de persistir o
+   resultado no próprio banco do cliente) — sobrevive a quedas e reinícios do
+   cliente, porque a fila e as mensagens são persistentes.
+
+Do lado do servidor: a resposta é publicada com `DeliveryMode` persistente e
+usando *publisher confirms* (`mandatory: true` + confirmação do broker). O
+servidor só dá `ack` no pedido original **depois** de confirmar que a
+resposta foi aceita/roteada pelo broker. Se a publicação falhar — broker
+fora do ar, ou a fila informada em `ReplyTo` não existir —, o pedido **não**
+é ack'd e volta para a fila de request, sendo reprocessado quando a conexão
+for restabelecida. Ou seja: uma resposta que não chega significa "o pedido
+ainda está pendente/será reprocessado", nunca "perdida silenciosamente".
+
+**Trade-off aceito**: o servidor não mantém nenhum estado próprio de
+notificações já processadas (sem persistência/idempotência aqui). Existe uma
+janela pequena entre "notificação enviada com sucesso" e "confirmação da
+publicação da resposta" em que uma queda do servidor pode causar
+reprocessamento do mesmo pedido — e, consequentemente, reenvio duplicado.
+Isso é deliberado, para não introduzir persistência de dados de negócio no
+servidor (que continua sendo responsabilidade do cliente).
 
 Se uma notificação de WhatsApp for pedida enquanto a sessão não está `Conectado`, o envio
 falha rápido (`Sucesso: false`) em vez de enfileirar/esperar — o chamador já é responsável
