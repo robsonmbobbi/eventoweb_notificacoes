@@ -1,4 +1,3 @@
-using QRCoder;
 using RabbitMQ.Client;
 
 namespace EventoWebNotificacoes;
@@ -112,44 +111,81 @@ public static class ConfiguracaoEndpoints
             configStore.SalvarCanais(new CanaisOptions { Email = input.Email, Whatsapp = input.Whatsapp });
 
             // Reflete a mudança em /api/status já nesta resposta, sem depender só da reação
-            // assíncrona do WhatsappConnectionService a ConfigStore.CanaisChanged.
+            // assíncrona do WhatsappValidacaoService a ConfigStore.CanaisChanged.
             if (!input.Email) gate.AtualizarEmail(false);
             if (!input.Whatsapp) gate.AtualizarWhatsapp(false);
 
             return Results.Ok();
         });
 
-        app.MapGet("/api/whatsapp/status", (WhatsappConnectionService whatsapp) =>
-            Results.Ok(BuildWhatsappStatusDto(whatsapp.CurrentState)));
-
-        app.MapPost("/api/whatsapp/logout", async (WhatsappConnectionService whatsapp) =>
+        app.MapGet("/api/config/whatsapp", (ConfigStore configStore) =>
         {
-            await whatsapp.LogoutAsync();
+            var whatsapp = configStore.Whatsapp ?? new WhatsappCloudOptions();
+            return Results.Ok(new WhatsappConfigDto(
+                whatsapp.PhoneNumberId,
+                whatsapp.WabaId,
+                !string.IsNullOrEmpty(whatsapp.AccessToken),
+                whatsapp.ApiVersion,
+                whatsapp.LimiteDiario,
+                !string.IsNullOrEmpty(whatsapp.WebhookVerifyToken)));
+        });
+
+        app.MapPut("/api/config/whatsapp", (WhatsappConfigInput input, ConfigStore configStore) =>
+        {
+            if (input.LimiteDiario < 0)
+                return Results.BadRequest(new { erro = "Limite diário não pode ser negativo." });
+
+            var atual = configStore.Whatsapp;
+            configStore.SalvarWhatsapp(new WhatsappCloudOptions
+            {
+                PhoneNumberId = input.PhoneNumberId.Trim(),
+                WabaId = input.WabaId.Trim(),
+                AccessToken = string.IsNullOrEmpty(input.AccessToken) ? (atual?.AccessToken ?? string.Empty) : input.AccessToken.Trim(),
+                ApiVersion = input.ApiVersion.Trim(),
+                LimiteDiario = input.LimiteDiario,
+                WebhookVerifyToken = string.IsNullOrEmpty(input.WebhookVerifyToken) ? (atual?.WebhookVerifyToken ?? string.Empty) : input.WebhookVerifyToken.Trim()
+            });
             return Results.Ok();
         });
+
+        app.MapPost("/api/config/whatsapp/validate", async (WhatsappValidacaoService validacao) =>
+        {
+            await validacao.ValidarAgoraAsync();
+            return Results.Ok(BuildWhatsappStatusDto(validacao.Status));
+        });
+
+        app.MapGet("/api/whatsapp/status", (WhatsappValidacaoService validacao, LimiteDiarioWhatsapp limite) =>
+            Results.Ok(BuildWhatsappStatusDto(validacao.Status, limite)));
 
         app.MapGet("/api/status", (ReadinessGate gate) => Results.Ok(gate.ObterStatus()));
     }
 
-    private static WhatsappStatusDto BuildWhatsappStatusDto(WhatsappConnectionState state)
-    {
-        string? qrPngBase64 = null;
-        if (state.QrCode != null)
-        {
-            var generator = new QRCodeGenerator();
-            var qrData = generator.CreateQrCode(state.QrCode, QRCodeGenerator.ECCLevel.L);
-            var png = new PngByteQRCode(qrData).GetGraphic(10);
-            qrPngBase64 = Convert.ToBase64String(png);
-        }
-
-        return new WhatsappStatusDto(state.Status.ToString(), qrPngBase64, state.UltimoErro, state.UltimaAtualizacao);
-    }
+    private static WhatsappStatusDto BuildWhatsappStatusDto(WhatsappValidacaoStatus status, LimiteDiarioWhatsapp? limite = null) =>
+        new(
+            status.Valido,
+            status.Numero?.NumeroExibicao,
+            status.Numero?.NomeVerificado,
+            status.Numero?.Qualidade,
+            status.Erro,
+            status.ValidadoEm,
+            limite?.ContarUltimas24h(),
+            limite?.Limite);
 }
 
 public record RabbitMqConfigDto(string HostName, int Port, string UserName, bool TemSenha, string VirtualHost, string RequestQueueName, ushort PrefetchCount);
 public record RabbitMqConfigInput(string HostName, int Port, string UserName, string? Password, string VirtualHost, string RequestQueueName, ushort PrefetchCount);
 public record EmailConfigDto(string ApiUrl, bool TemApiKey, string FromAddress);
 public record EmailConfigInput(string ApiUrl, string? ApiKey, string FromAddress);
-public record WhatsappStatusDto(string Status, string? QrCodePngBase64, string? UltimoErro, DateTimeOffset UltimaAtualizacao);
+public record WhatsappConfigDto(string PhoneNumberId, string WabaId, bool TemAccessToken, string ApiVersion, int LimiteDiario, bool TemWebhookVerifyToken);
+public record WhatsappConfigInput(string PhoneNumberId, string WabaId, string? AccessToken, string ApiVersion, int LimiteDiario, string? WebhookVerifyToken);
+public record WhatsappStatusDto(
+    bool Valido,
+    string? NumeroExibicao,
+    string? NomeVerificado,
+    string? Qualidade,
+    string? Erro,
+    DateTimeOffset? ValidadoEm,
+    int? EnviadosUltimas24h,
+    int? LimiteDiario);
 public record CanaisConfigDto(bool Email, bool Whatsapp);
 public record CanaisConfigInput(bool Email, bool Whatsapp);

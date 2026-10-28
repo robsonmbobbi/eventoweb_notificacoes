@@ -18,7 +18,7 @@
   #banner { padding: 0.7rem 1rem; border-radius: 8px; margin-bottom: 1.5rem; font-weight: 600; }
   #banner.pronto { background: #e3f7e8; color: #0a7a26; }
   #banner.aguardando { background: #fff4e0; color: #8a5a00; }
-  #qr { margin-top: 0.6rem; max-width: 220px; display: block; }
+  .info { font-size: 0.85rem; margin: 0.3rem 0; }
 </style>
 </head>
 <body>
@@ -66,10 +66,21 @@
 
 <section id="section-whatsapp">
   <h2>WhatsApp</h2>
-  <p>Status: <strong id="whatsapp-status">-</strong></p>
-  <img id="qr" style="display:none" alt="QR Code do WhatsApp" />
+  <p class="info">Status: <strong id="whatsapp-status">-</strong></p>
+  <p class="info" id="whatsapp-numero"></p>
+  <p class="info">Envios nas últimas 24h: <strong id="whatsapp-uso">-</strong></p>
   <div class="msg erro" id="whatsapp-erro"></div>
-  <button type="button" id="btn-whatsapp-logout">Sair / trocar número</button>
+  <form id="form-whatsapp">
+    <label>Phone Number ID <input name="phoneNumberId" required></label>
+    <label>WhatsApp Business Account ID (WABA) <input name="wabaId" required></label>
+    <label>Access Token (deixe em branco para manter o atual) <input name="accessToken" type="password"></label>
+    <label>Versão da Graph API <input name="apiVersion" required placeholder="v23.0"></label>
+    <label>Limite de mensagens em 24h <input name="limiteDiario" type="number" min="0" required></label>
+    <label>Verify token do webhook /webhook/whatsapp (deixe em branco para manter o atual) <input name="webhookVerifyToken" type="password"></label>
+    <button type="submit">Salvar</button>
+    <button type="button" id="btn-whatsapp-validate">Validar</button>
+    <div class="msg" id="msg-whatsapp"></div>
+  </form>
 </section>
 
 <script>
@@ -167,21 +178,61 @@ document.getElementById('btn-email-validate').addEventListener('click', async ()
   atualizarTudo();
 });
 
-document.getElementById('btn-whatsapp-logout').addEventListener('click', async () => {
-  await fetch('/api/whatsapp/logout', { method: 'POST' });
+async function carregarWhatsapp() {
+  const r = await fetch('/api/config/whatsapp').then(r => r.json());
+  const f = document.getElementById('form-whatsapp');
+  f.phoneNumberId.value = r.phoneNumberId;
+  f.wabaId.value = r.wabaId;
+  f.accessToken.placeholder = r.temAccessToken ? '••••••••' : '';
+  f.apiVersion.value = r.apiVersion;
+  f.limiteDiario.value = r.limiteDiario;
+  f.webhookVerifyToken.placeholder = r.temWebhookVerifyToken ? '••••••••' : '';
+}
+
+document.getElementById('form-whatsapp').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const msg = document.getElementById('msg-whatsapp');
+  const body = {
+    phoneNumberId: f.phoneNumberId.value,
+    wabaId: f.wabaId.value,
+    accessToken: f.accessToken.value || null,
+    apiVersion: f.apiVersion.value,
+    limiteDiario: Number(f.limiteDiario.value),
+    webhookVerifyToken: f.webhookVerifyToken.value || null
+  };
+  const resp = await fetch('/api/config/whatsapp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!resp.ok) {
+    const erro = await resp.json().catch(() => ({}));
+    msg.className = 'msg erro';
+    msg.textContent = erro.erro || 'Falha ao salvar.';
+    return;
+  }
+  f.accessToken.value = '';
+  f.webhookVerifyToken.value = '';
+  msg.className = 'msg ok';
+  msg.textContent = 'Salvo. Validando...';
+  await carregarWhatsapp();
+});
+
+document.getElementById('btn-whatsapp-validate').addEventListener('click', async () => {
+  const msg = document.getElementById('msg-whatsapp');
+  msg.className = 'msg';
+  msg.textContent = 'Validando...';
+  const r = await fetch('/api/config/whatsapp/validate', { method: 'POST' }).then(r => r.json());
+  msg.className = 'msg ' + (r.valido ? 'ok' : 'erro');
+  msg.textContent = r.valido ? 'Credenciais válidas.' : ('Falhou: ' + (r.erro || 'erro desconhecido'));
+  atualizarTudo();
 });
 
 async function atualizarWhatsapp() {
   const r = await fetch('/api/whatsapp/status').then(r => r.json());
-  document.getElementById('whatsapp-status').textContent = r.status;
-  document.getElementById('whatsapp-erro').textContent = r.ultimoErro || '';
-  const qr = document.getElementById('qr');
-  if (r.qrCodePngBase64) {
-    qr.src = 'data:image/png;base64,' + r.qrCodePngBase64;
-    qr.style.display = 'block';
-  } else {
-    qr.style.display = 'none';
-  }
+  document.getElementById('whatsapp-status').textContent = r.valido ? 'Validado' : (r.erro ? 'Erro' : 'Pendente');
+  document.getElementById('whatsapp-numero').textContent = r.valido
+    ? `Número: ${r.numeroExibicao || '-'} · Nome: ${r.nomeVerificado || '-'} · Qualidade: ${r.qualidade || '-'}`
+    : '';
+  document.getElementById('whatsapp-uso').textContent = `${r.enviadosUltimas24h} / ${r.limiteDiario}`;
+  document.getElementById('whatsapp-erro').textContent = r.erro || '';
 }
 
 function aplicarBanner(status) {
@@ -202,6 +253,7 @@ function aplicarBanner(status) {
 // tick re-lê /api/status e reaplica a visibilidade das seções, em vez de decidir isso só uma
 // vez no carregamento da página.
 let emailVisivelAnterior = false;
+let whatsappVisivelAnterior = false;
 
 async function atualizarTudo() {
   const status = await fetch('/api/status').then(r => r.json());
@@ -212,6 +264,9 @@ async function atualizarTudo() {
 
   if (status.emailHabilitado && !emailVisivelAnterior) await carregarEmail();
   emailVisivelAnterior = status.emailHabilitado;
+
+  if (status.whatsappHabilitado && !whatsappVisivelAnterior) await carregarWhatsapp();
+  whatsappVisivelAnterior = status.whatsappHabilitado;
 
   if (status.whatsappHabilitado) await atualizarWhatsapp();
 

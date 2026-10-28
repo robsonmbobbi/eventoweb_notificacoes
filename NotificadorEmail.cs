@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace EventoWebNotificacoes
 {
@@ -43,10 +44,16 @@ namespace EventoWebNotificacoes
                     }
                 },
                 subject,
-                htmlContent = body
+                htmlContent = body,
+                attachment = notificacao.Anexos.Count > 0
+                    ? notificacao.Anexos
+                        .Select(a => new { name = a.NomeArquivo, content = Convert.ToBase64String(a.Conteudo) })
+                        .ToArray()
+                    : null
             };
 
-            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+            var serializerOptions = new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
+            var content = new StringContent(JsonSerializer.Serialize(payload, serializerOptions), Encoding.UTF8, "application/json");
             var response = await clientHttp.PostAsync("v3/smtp/email", content);
 
             if (!response.IsSuccessStatusCode)

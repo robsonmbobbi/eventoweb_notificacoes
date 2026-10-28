@@ -9,11 +9,13 @@ public class ConfigStore : IDisposable
     private readonly ILiteCollection<RabbitMqOptions> _rabbitMqCollection;
     private readonly ILiteCollection<NotificationWorkerOptions.EmailOptions> _emailCollection;
     private readonly ILiteCollection<CanaisOptions> _canaisCollection;
+    private readonly ILiteCollection<WhatsappCloudOptions> _whatsappCollection;
 
     private readonly object _lock = new();
     private RabbitMqOptions _rabbitMq;
     private NotificationWorkerOptions.EmailOptions? _email;
     private CanaisOptions _canais;
+    private WhatsappCloudOptions? _whatsapp;
 
     public ConfigStore(IOptions<StorageOptions> storageOptions, IConfiguration configuration)
     {
@@ -26,11 +28,16 @@ public class ConfigStore : IDisposable
         _rabbitMqCollection = _db.GetCollection<RabbitMqOptions>("rabbitmq");
         _emailCollection = _db.GetCollection<NotificationWorkerOptions.EmailOptions>("email");
         _canaisCollection = _db.GetCollection<CanaisOptions>("canais");
+        _whatsappCollection = _db.GetCollection<WhatsappCloudOptions>("whatsapp");
 
         _rabbitMq = _rabbitMqCollection.FindAll().FirstOrDefault() ?? SeedRabbitMq(configuration);
         _email = _emailCollection.FindAll().FirstOrDefault() ?? SeedEmail(configuration);
         _canais = _canaisCollection.FindAll().FirstOrDefault() ?? SeedCanais(configuration);
+        _whatsapp = _whatsappCollection.FindAll().FirstOrDefault() ?? SeedWhatsapp(configuration);
     }
+
+    // Exposto para dados operacionais que vivem no mesmo arquivo (ex.: LimiteDiarioWhatsapp).
+    public LiteDatabase Database => _db;
 
     public RabbitMqOptions RabbitMq
     {
@@ -47,8 +54,14 @@ public class ConfigStore : IDisposable
         get { lock (_lock) return _canais; }
     }
 
+    public WhatsappCloudOptions? Whatsapp
+    {
+        get { lock (_lock) return _whatsapp; }
+    }
+
     public event Action? ConfigChanged;
     public event Action<CanaisOptions>? CanaisChanged;
+    public event Action? WhatsappChanged;
 
     public void SalvarRabbitMq(RabbitMqOptions options)
     {
@@ -70,6 +83,18 @@ public class ConfigStore : IDisposable
             _email = options;
         }
         ConfigChanged?.Invoke();
+    }
+
+    public void SalvarWhatsapp(WhatsappCloudOptions options)
+    {
+        lock (_lock)
+        {
+            _whatsappCollection.DeleteAll();
+            _whatsappCollection.Insert(options);
+            _whatsapp = options;
+        }
+        ConfigChanged?.Invoke();
+        WhatsappChanged?.Invoke();
     }
 
     public void SalvarCanais(CanaisOptions options)
@@ -104,6 +129,21 @@ public class ConfigStore : IDisposable
             return null;
 
         _emailCollection.Insert(seed);
+        return seed;
+    }
+
+    private WhatsappCloudOptions? SeedWhatsapp(IConfiguration configuration)
+    {
+        var section = configuration.GetSection("Whatsapp");
+        if (!section.Exists())
+            return null;
+
+        var seed = new WhatsappCloudOptions();
+        section.Bind(seed);
+        if (string.IsNullOrWhiteSpace(seed.PhoneNumberId) && string.IsNullOrWhiteSpace(seed.WabaId) && string.IsNullOrWhiteSpace(seed.AccessToken))
+            return null;
+
+        _whatsappCollection.Insert(seed);
         return seed;
     }
 
