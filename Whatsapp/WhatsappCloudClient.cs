@@ -2,12 +2,13 @@ using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 
 namespace EventoWebNotificacoes;
 
 /// <summary>
-/// Cliente HTTP da WhatsApp Cloud API (Graph API da Meta). Lê as credenciais ao vivo de
-/// <see cref="ConfigStore.Whatsapp"/>, então mudanças feitas pela UI valem já na próxima chamada.
+/// Cliente HTTP da WhatsApp Cloud API (Graph API da Meta), com as credenciais da seção
+/// <c>Whatsapp</c> do appsettings.
 /// </summary>
 public class WhatsappCloudClient
 {
@@ -15,18 +16,17 @@ public class WhatsappCloudClient
     private static readonly TimeSpan TemplateCacheTtl = TimeSpan.FromMinutes(10);
 
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly ConfigStore _configStore;
+    private readonly WhatsappCloudOptions _options;
     private readonly ILogger<WhatsappCloudClient> _logger;
 
     // Evita uma consulta à Graph API por notificação só para descobrir as variáveis do template.
     private readonly ConcurrentDictionary<(string Nome, string Idioma), (WhatsappTemplate Template, DateTimeOffset ExpiraEm)> _templateCache = new();
 
-    public WhatsappCloudClient(IHttpClientFactory httpClientFactory, ConfigStore configStore, ILogger<WhatsappCloudClient> logger)
+    public WhatsappCloudClient(IHttpClientFactory httpClientFactory, IOptions<WhatsappCloudOptions> options, ILogger<WhatsappCloudClient> logger)
     {
         _httpClientFactory = httpClientFactory;
-        _configStore = configStore;
+        _options = options.Value;
         _logger = logger;
-        _configStore.WhatsappChanged += () => _templateCache.Clear();
     }
 
     public async Task<WhatsappNumeroInfo> ValidarAsync(CancellationToken ct = default)
@@ -132,10 +132,9 @@ public class WhatsappCloudClient
 
     private WhatsappCloudOptions ObterOptions()
     {
-        var options = _configStore.Whatsapp;
-        if (options is null || !options.EstaCompleta)
+        if (!_options.EstaCompleta)
             throw new NotSupportedException("Meio de notificação não configurado neste worker: WhatsApp");
-        return options;
+        return _options;
     }
 
     private async Task<JsonDocument> EnviarRequisicaoAsync(WhatsappCloudOptions options, HttpMethod metodo, string caminho, HttpContent? conteudo, CancellationToken ct)

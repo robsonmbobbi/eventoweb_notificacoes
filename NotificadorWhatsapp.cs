@@ -19,12 +19,10 @@ namespace EventoWebNotificacoes
         private static readonly FileExtensionContentTypeProvider TiposMime = new();
 
         private readonly WhatsappCloudClient _client;
-        private readonly LimiteDiarioWhatsapp _limite;
 
-        public NotificadorWhatsapp(WhatsappCloudClient client, LimiteDiarioWhatsapp limite)
+        public NotificadorWhatsapp(WhatsappCloudClient client)
         {
             _client = client;
-            _limite = limite;
         }
 
         public async Task EnviarAsync(NotificacaoRequest notificacao)
@@ -43,7 +41,7 @@ namespace EventoWebNotificacoes
             var template = await _client.ObterTemplateAsync(notificacao.TemplateWhatsapp, idioma).ConfigureAwait(false);
             var dados = LerDados(notificacao.DadosJson);
 
-            // Tudo que pode falhar localmente é validado antes de reservar cota e de subir mídia.
+            // Tudo que pode falhar localmente é validado antes de subir mídia.
             var parametrosCabecalho = template.FormatoCabecalho == "TEXT"
                 ? MontarParametrosTexto(template, template.TextoCabecalho, dados)
                 : new List<object>();
@@ -55,25 +53,16 @@ namespace EventoWebNotificacoes
             if (!template.CabecalhoEhMidia && anexo is not null)
                 throw new Exception($"Template '{template.Nome}' não tem cabeçalho de mídia; não é possível enviar anexo com ele.");
 
-            var reserva = _limite.Reservar();
-            try
-            {
-                if (anexo is not null)
-                    parametrosCabecalho.Add(await MontarParametroMidiaAsync(template, anexo).ConfigureAwait(false));
+            if (anexo is not null)
+                parametrosCabecalho.Add(await MontarParametroMidiaAsync(template, anexo).ConfigureAwait(false));
 
-                var componentes = new List<object>();
-                if (parametrosCabecalho.Count > 0)
-                    componentes.Add(new { type = "header", parameters = parametrosCabecalho });
-                if (parametrosCorpo.Count > 0)
-                    componentes.Add(new { type = "body", parameters = parametrosCorpo });
+            var componentes = new List<object>();
+            if (parametrosCabecalho.Count > 0)
+                componentes.Add(new { type = "header", parameters = parametrosCabecalho });
+            if (parametrosCorpo.Count > 0)
+                componentes.Add(new { type = "body", parameters = parametrosCorpo });
 
-                await _client.EnviarTemplateAsync(dest, template.Nome, template.Idioma, componentes).ConfigureAwait(false);
-            }
-            catch
-            {
-                _limite.Liberar(reserva);
-                throw;
-            }
+            await _client.EnviarTemplateAsync(dest, template.Nome, template.Idioma, componentes).ConfigureAwait(false);
         }
 
         private static List<object> MontarParametrosTexto(WhatsappTemplate template, string? texto, IReadOnlyDictionary<string, string> dados)

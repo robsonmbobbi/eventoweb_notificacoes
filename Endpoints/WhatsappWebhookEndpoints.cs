@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 
 namespace EventoWebNotificacoes;
 
@@ -11,9 +12,9 @@ public static class WhatsappWebhookEndpoints
     public static void MapWhatsappWebhookEndpoints(this WebApplication app)
     {
         // Verificação feita pela Meta ao cadastrar a URL do webhook no app.
-        app.MapGet("/webhook/whatsapp", (HttpRequest request, ConfigStore configStore) =>
+        app.MapGet("/webhook/whatsapp", (HttpRequest request, IOptions<WhatsappCloudOptions> options) =>
         {
-            var token = configStore.Whatsapp?.WebhookVerifyToken;
+            var token = options.Value.WebhookVerifyToken;
             var query = request.Query;
 
             if (query["hub.mode"] == "subscribe" &&

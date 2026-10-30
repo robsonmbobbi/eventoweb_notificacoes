@@ -1,13 +1,13 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace EventoWebNotificacoes;
 
 /// <summary>
-/// Mantém o WhatsApp marcado como validado no <see cref="ReadinessGate"/> sem intervenção manual:
-/// valida as credenciais na Graph API no boot e sempre que a configuração ou os canais mudam,
-/// com retry/backoff em caso de falha. Assim um restart de uma instância só-WhatsApp volta a
-/// consumir a fila sozinha, como acontecia com a reconexão automática do Baileys.
+/// Valida as credenciais da WhatsApp Cloud API no boot, com retry/backoff em caso de falha, e
+/// libera o <see cref="ReadinessGate"/> na primeira validação bem-sucedida. Assim um restart de uma
+/// instância só-WhatsApp volta a consumir a fila sozinha.
 /// </summary>
 public class WhatsappValidacaoService : BackgroundService
 {
@@ -16,103 +16,54 @@ public class WhatsappValidacaoService : BackgroundService
 
     private readonly ILogger<WhatsappValidacaoService> _logger;
     private readonly WhatsappCloudClient _client;
-    private readonly ConfigStore _configStore;
+    private readonly CanaisOptions _canais;
     private readonly ReadinessGate _gate;
-
-    private readonly SemaphoreSlim _validacaoLock = new(1, 1);
-    private volatile TaskCompletionSource _wake = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private volatile WhatsappValidacaoStatus _status = new(false, null, null, null);
 
     public WhatsappValidacaoService(
         ILogger<WhatsappValidacaoService> logger,
         WhatsappCloudClient client,
-        ConfigStore configStore,
+        IOptions<CanaisOptions> canais,
         ReadinessGate gate)
     {
         _logger = logger;
         _client = client;
-        _configStore = configStore;
+        _canais = canais.Value;
         _gate = gate;
     }
 
-    public WhatsappValidacaoStatus Status => _status;
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _configStore.CanaisChanged += OnConfigChanged;
-        _configStore.WhatsappChanged += OnConfigChanged;
+        if (!_canais.Whatsapp)
+            return;
+
+        var retryDelay = MinRetryDelay;
+
         try
         {
-            var retryDelay = MinRetryDelay;
-
             while (!stoppingToken.IsCancellationRequested)
             {
-                // Troca o TCS antes de validar: uma mudança que chegue durante a validação acorda o próximo ciclo.
-                var wake = _wake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-                var precisaValidar = _configStore.Canais.Whatsapp && _configStore.Whatsapp is { EstaCompleta: true };
-                TimeSpan espera = Timeout.InfiniteTimeSpan;
-
-                if (precisaValidar)
+                try
                 {
-                    if (await ValidarAgoraAsync(stoppingToken))
-                    {
-                        retryDelay = MinRetryDelay;
-                    }
-                    else
-                    {
-                        espera = retryDelay;
-                        retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, MaxRetryDelay.TotalSeconds));
-                    }
+                    var info = await _client.ValidarAsync(stoppingToken);
+                    _gate.MarcarWhatsappValidado();
+                    _logger.LogInformation("Canal WhatsApp operacional: Cloud API validada para {Numero} ({Nome}), qualidade {Qualidade}.",
+                        info.NumeroExibicao, info.NomeVerificado, info.Qualidade);
+                    return;
                 }
-                else
+                catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
                 {
-                    _gate.AtualizarWhatsapp(false);
-                    retryDelay = MinRetryDelay;
+                    _logger.LogWarning(ex,
+                        "Canal WhatsApp habilitado mas NÃO operacional: falha ao validar na Graph API ({Erro}). " +
+                        "Consumo da fila bloqueado; nova tentativa em {Delay}s.",
+                        ex.Message, retryDelay.TotalSeconds);
                 }
 
-                using var registration = stoppingToken.Register(() => wake.TrySetResult());
-                await Task.WhenAny(Task.Delay(espera, stoppingToken), wake.Task);
+                await Task.Delay(retryDelay, stoppingToken);
+                retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, MaxRetryDelay.TotalSeconds));
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
         }
-        finally
-        {
-            _configStore.CanaisChanged -= OnConfigChanged;
-            _configStore.WhatsappChanged -= OnConfigChanged;
-        }
     }
-
-    /// <summary>Valida as credenciais agora (usado também pelo botão "Validar" da UI).</summary>
-    public async Task<bool> ValidarAgoraAsync(CancellationToken ct = default)
-    {
-        await _validacaoLock.WaitAsync(ct);
-        try
-        {
-            var info = await _client.ValidarAsync(ct);
-            _status = new WhatsappValidacaoStatus(true, info, null, DateTimeOffset.UtcNow);
-            _gate.AtualizarWhatsapp(true);
-            _logger.LogInformation("WhatsApp Cloud API validada: {Numero} ({Nome}), qualidade {Qualidade}.",
-                info.NumeroExibicao, info.NomeVerificado, info.Qualidade);
-            return true;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-        {
-            _status = new WhatsappValidacaoStatus(false, null, ex.Message, DateTimeOffset.UtcNow);
-            _gate.AtualizarWhatsapp(false);
-            _logger.LogWarning(ex, "Falha ao validar a configuração da WhatsApp Cloud API.");
-            return false;
-        }
-        finally
-        {
-            _validacaoLock.Release();
-        }
-    }
-
-    private void OnConfigChanged() => _wake.TrySetResult();
-    private void OnConfigChanged(CanaisOptions _) => _wake.TrySetResult();
 }
-
-public sealed record WhatsappValidacaoStatus(bool Valido, WhatsappNumeroInfo? Numero, string? Erro, DateTimeOffset? ValidadoEm);

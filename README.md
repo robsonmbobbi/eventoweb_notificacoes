@@ -1,34 +1,21 @@
 # eventoweb_notificacoes
 
 Worker que envia notificações (Email/WhatsApp) atuando como **servidor RPC do RabbitMQ**
-(padrão request/reply do RabbitMQ, com `ReplyTo`/`CorrelationId`), com uma **interface web
-de configuração** embutida no próprio processo.
+(padrão request/reply do RabbitMQ, com `ReplyTo`/`CorrelationId`).
 
 Quem chama via RPC é responsável por resolver o template (assunto/corpo) e as variáveis
-antes de publicar o pedido, e por persistir o status de envio no seu próprio banco — isso
-não mudou. O serviço tem persistência local própria (embutida via LiteDB) para guardar a
-configuração de RabbitMQ/Email/WhatsApp e o contador do limite diário do WhatsApp, editável
-em runtime pela UI web, em vez de depender só de `appsettings.json` estático.
+antes de publicar o pedido, e por persistir o status de envio no seu próprio banco. O
+serviço não tem persistência local nem interface web: toda a configuração vem do
+`appsettings.json` (ou variáveis de ambiente) e é lida no boot.
 
 O envio de WhatsApp usa a **API oficial da Meta (WhatsApp Cloud API)**, chamada por HTTPS
 na Graph API. (Versões anteriores usavam BaileysCSharp, emulando o WhatsApp Web via QR Code.)
 
 ## Configuração
 
-O serviço só começa a consumir a fila do RabbitMQ quando: (1) a configuração do RabbitMQ
-está validada, **e** (2) todos os canais habilitados nesta instância (`Canais:Email` /
-`Canais:Whatsapp`, ver abaixo) também estão validados. Enquanto isso não acontece, o
-processo fica de pé servindo só a interface de configuração.
-
-**Primeira execução**: abra `http://localhost:<porta>/` (redireciona para `/admin.html`) e
-preencha RabbitMQ, Email e/ou as credenciais da WhatsApp Cloud API por lá. Não é mais necessário
-editar `appsettings.json` à mão para isso.
-
-**`appsettings.json`** (não versionado) ainda existe, mas agora serve só de **seed**: na
-primeira execução, se a configuração salva (LiteDB) estiver vazia e a seção
-correspondente do `appsettings.json` estiver preenchida, ela é usada para popular o banco
-uma única vez. Depois disso, edições passam a ser feitas pela UI — reeditar
-`appsettings.json` não tem mais efeito.
+Tudo fica no **`appsettings.json`** (não versionado) ou em variáveis de ambiente equivalentes
+(ex.: `RabbitMq__HostName`, `Whatsapp__AccessToken`). A configuração é lida só no boot —
+**qualquer mudança exige reiniciar o processo**.
 
 ```json
 {
@@ -49,10 +36,7 @@ uma única vez. Depois disso, edições passam a ser feitas pela UI — reeditar
     "WabaId": "...",
     "AccessToken": "...",
     "ApiVersion": "v23.0",
-    "LimiteDiario": 250
-  },
-  "Storage": {
-    "ConfigDbPath": "./data/notificacoes-config.db"
+    "WebhookVerifyToken": "..."
   },
   "Canais": {
     "Email": true,
@@ -61,23 +45,18 @@ uma única vez. Depois disso, edições passam a ser feitas pela UI — reeditar
 }
 ```
 
-`Storage:ConfigDbPath` é exceção: continua vindo só do `appsettings.json`/variáveis de
-ambiente, nunca da UI/LiteDB (é decisão de infraestrutura/deploy). `Whatsapp` e `Canais`
-seguem o mesmo padrão de seed do RabbitMq/Email descrito acima.
+O processo **falha ao subir**, com mensagem clara, se nenhum canal estiver habilitado ou se
+um canal habilitado estiver com a configuração incompleta (`Notification:Email` sem
+`ApiUrl`/`ApiKey`/`FromAddress`, ou `Whatsapp` sem `PhoneNumberId`/`WabaId`/`AccessToken`/
+`ApiVersion`). A seção de um canal desabilitado pode ficar vazia.
+
+Com WhatsApp habilitado, o consumo da fila só começa depois que as credenciais forem
+validadas na Graph API (feito automaticamente no boot, com retry). A conexão com o RabbitMQ
+tem seu próprio laço de reconexão.
 
 ### Canais (`Canais:Email` / `Canais:Whatsapp`)
 
-Controla quais canais este processo serve. Editável pela seção "Canais habilitados" em
-`/admin.html` (`GET`/`PUT /api/config/canais`) — **a mudança tem efeito imediato, sem
-precisar reiniciar o processo**: marcar WhatsApp dispara na hora a validação das
-credenciais na Graph API; desmarcar faz os pedidos de WhatsApp passarem a ser recusados.
-
-`appsettings.json`'s `Canais` (default `{ "Email": true, "Whatsapp": true }` se a seção
-não existir) serve só de **seed no primeiro boot** — depois disso, edições passam a ser
-feitas pela UI, igual RabbitMq/Email. Se os dois estiverem `false` nesse seed inicial, o
-processo falha ao subir com uma mensagem de erro clara; depois do primeiro boot, tentar
-desabilitar os dois pela UI é rejeitado com `400` (pelo menos um precisa continuar
-habilitado).
+Controla quais canais este processo serve (default `true` para ambos se a seção não existir).
 
 Um pedido de notificação para um canal desabilitado nesta instância não derruba o
 processo: a resposta RPC volta com `Sucesso: false` e
@@ -85,8 +64,7 @@ processo: a resposta RPC volta com `Sucesso: false` e
 
 **Deploy dividido por máquina** (ex.: Email numa máquina com IP fixo para o allowlist do
 provedor): suba cada
-instância com o `Canais` inicial já correto (seed) ou ajuste pela UI logo após o primeiro
-boot, e configure `RabbitMq:RequestQueueName` com uma fila própria por máquina, por
+instância com o `Canais` correto no seu `appsettings.json` e configure `RabbitMq:RequestQueueName` com uma fila própria por máquina, por
 exemplo:
 
 - Máquina WhatsApp: canal Email desabilitado, `RabbitMq:RequestQueueName=notificacoes.enviar.whatsapp`.
@@ -100,12 +78,6 @@ instância de Email (ou vice-versa) por round-robin entre consumidores concorren
 de quem publica** (fora deste repositório) — este serviço não declara topologia nem faz
 esse roteamento entre filas; ele só se defende de receber a mensagem errada respondendo
 com erro via RPC, como descrito acima.
-
-### Volumes persistentes (deploy)
-
-`Storage:ConfigDbPath` (padrão `./data/notificacoes-config.db`) precisa sobreviver a um
-redeploy/restart do container: guarda a configuração de RabbitMQ/Email/WhatsApp salva pela
-UI e o histórico de envios usado no limite diário do WhatsApp.
 
 ## WhatsApp (Cloud API da Meta)
 
@@ -127,13 +99,13 @@ UI e o histórico de envios usado no limite diário do WhatsApp.
    `whatsapp_business_messaging` e `whatsapp_business_management`, validade "Nunca". O
    token temporário da tela *API Setup* expira em 24h.
 7. Copiar **Phone Number ID** e **WABA ID** (App → WhatsApp → API Setup) e preencher, junto
-   com o token, na seção WhatsApp de `/admin.html`.
+   com o token, na seção `Whatsapp` do `appsettings.json`.
 8. **Templates** (WhatsApp Manager → Modelos de mensagem): categoria **Utilidade**, idioma
    `pt_BR`, **variáveis nomeadas** (`{{nome_participante}}`) com os mesmos nomes das chaves
    do `dadosJson`. Para anexo, cabeçalho do tipo **Documento** (ou Imagem/Vídeo). Evite
    linguagem promocional, senão a Meta reclassifica como Marketing.
 9. Só envie para quem consentiu (ex.: checkbox na inscrição) — bloqueios e denúncias
-   derrubam a *quality rating* do número, exibida na UI após validar.
+   derrubam a *quality rating* do número, registrada no log ao validar no boot.
 
 ### Como o envio funciona
 
@@ -148,15 +120,13 @@ UI e o histórico de envios usado no limite diário do WhatsApp.
 - **Anexo**: no máximo 1, e só com template de cabeçalho de mídia (o arquivo é enviado via
   upload de mídia e usado no cabeçalho). Template com cabeçalho de mídia sem anexo, anexo
   com template sem cabeçalho de mídia ou 2+ anexos → erro.
-- **Limite diário** (`Whatsapp:LimiteDiario`, padrão 250, editável na UI): conta mensagens
-  numa janela móvel de 24h, persistida no LiteDB. Ao atingir, o pedido volta com
-  `Sucesso: false` e a hora em que abre a próxima vaga. Envios que falham não contam.
 - `Sucesso: true` significa que a Meta **aceitou** a mensagem. Falhas de entrega posteriores
   (ex.: número sem WhatsApp) não voltam pela RPC — só aparecem no log, via webhook de status
   (ver abaixo). O envio também loga o `wa_id` devolvido pela Meta e avisa quando ele difere
   do número enviado (nono dígito BR).
-- Credenciais são validadas automaticamente no boot e a cada mudança de configuração/canal
-  (com retry), então um restart volta a consumir a fila sem intervenção.
+- Credenciais são validadas automaticamente no boot (com retry), então um restart volta a
+  consumir a fila sem intervenção. Não há limite diário próprio: o teto de envios é o da Meta
+  (250 destinatários únicos/24h para portfólio não verificado).
 - Escopo é de **instância única** — um número de WhatsApp para o processo todo.
 
 Erros comuns da Meta aparecem traduzidos em `mensagemErro`: `190` token inválido/expirado,
@@ -169,7 +139,7 @@ A Cloud API não permite consultar o status de uma mensagem pelo `wamid`; enviad
 lida ou falha só chegam por webhook. O worker expõe `GET/POST /webhook/whatsapp` e registra
 cada status no log (falhas em Warning, com `code`, `title` e `details`).
 
-1. Defina um **verify token** qualquer na seção WhatsApp de `/admin.html`.
+1. Defina um **verify token** qualquer em `Whatsapp:WebhookVerifyToken` no `appsettings.json`.
 2. Sem endereço público (desenvolvimento), abra um túnel:
    `cloudflared tunnel --url http://localhost:<porta>` → gera `https://xxxx.trycloudflare.com`
    (a URL muda a cada execução).
@@ -256,7 +226,7 @@ reprocessamento do mesmo pedido — e, consequentemente, reenvio duplicado.
 Isso é deliberado, para não introduzir persistência de dados de negócio no
 servidor (que continua sendo responsabilidade do cliente).
 
-Se uma notificação de WhatsApp falhar (Meta indisponível, limite diário atingido etc.), o
+Se uma notificação de WhatsApp falhar (Meta indisponível, limite de taxa etc.), o
 envio falha rápido (`Sucesso: false`) em vez de enfileirar/esperar — o chamador já é
 responsável por retry, então não há uma segunda fila de retry escondida aqui.
 
@@ -268,10 +238,9 @@ Requer RabbitMQ acessível (local ou remoto).
 dotnet run
 ```
 
-Os logs indicam a porta em uso (`Now listening on: https://localhost:5001`, por exemplo).
-Abra essa URL no navegador — ela redireciona para `/admin.html` — e configure RabbitMQ,
-Email e/ou WhatsApp por ali. O worker só passa a consumir `notificacoes.enviar` depois que
-o banner do topo da página mostrar "Pronto".
+Preencha antes o `appsettings.json` (ver [Configuração](#configuração)). O log
+`Consumindo fila '<fila>' em <host>:<porta>` indica que o worker está pronto. A porta HTTP
+(`Now listening on: ...`) só é usada pelo webhook do WhatsApp.
 
 A fila (`RabbitMq:RequestQueueName`) é criada/gerenciada pela infra — este serviço não
 declara topologia, apenas consome; se a fila ainda não existir, o consumo falha e o
