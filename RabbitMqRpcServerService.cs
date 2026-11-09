@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
@@ -9,32 +10,33 @@ namespace EventoWebNotificacoes;
 public class RabbitMqRpcServerService : BackgroundService
 {
     private readonly ILogger<RabbitMqRpcServerService> _logger;
-    private readonly ConfigStore _configStore;
+    private readonly RabbitMqOptions _options;
     private readonly INotificadorResolver _resolver;
     private readonly ReadinessGate _gate;
+    private readonly CanaisOptions _canais;
 
     private static readonly TimeSpan MinRetryDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(30);
 
-    private volatile TaskCompletionSource? _connectionLost;
-
     public RabbitMqRpcServerService(
         ILogger<RabbitMqRpcServerService> logger,
-        ConfigStore configStore,
+        IOptions<RabbitMqOptions> options,
         INotificadorResolver resolver,
-        ReadinessGate gate)
+        ReadinessGate gate,
+        IOptions<CanaisOptions> canais)
     {
         _logger = logger;
-        _configStore = configStore;
+        _options = options.Value;
         _resolver = resolver;
         _gate = gate;
+        _canais = canais.Value;
     }
-
-    /// <summary>Corta a conexão atual imediatamente, forçando o loop de reconexão a reler a configuração.</summary>
-    public void ForcarReconexao() => _connectionLost?.TrySetResult();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!_gate.EstaPronto)
+            _logger.LogInformation("Aguardando validação do WhatsApp antes de consumir a fila.");
+
         await _gate.AguardarProntoAsync(stoppingToken);
 
         var retryDelay = MinRetryDelay;
@@ -70,7 +72,7 @@ public class RabbitMqRpcServerService : BackgroundService
 
     private async Task RunOnceAsync(CancellationToken stoppingToken)
     {
-        var options = _configStore.RabbitMq;
+        var options = _options;
 
         var factory = new ConnectionFactory
         {
@@ -98,7 +100,6 @@ public class RabbitMqRpcServerService : BackgroundService
             cancellationToken: stoppingToken);
 
         var connectionLost = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _connectionLost = connectionLost;
         connection.ConnectionShutdownAsync += (_, _) =>
         {
             connectionLost.TrySetResult();
@@ -114,9 +115,15 @@ public class RabbitMqRpcServerService : BackgroundService
             consumer: consumer,
             cancellationToken: stoppingToken);
 
+        // Aqui todos os canais habilitados estão operacionais: config validada no start e WhatsApp
+        // validado na Graph API (ReadinessGate).
+        var operacionais = new List<string>();
+        if (_canais.Email) operacionais.Add("Email");
+        if (_canais.Whatsapp) operacionais.Add("WhatsApp");
+
         _logger.LogInformation(
-            "Consumindo fila '{Queue}' em {Host}:{Port}",
-            options.RequestQueueName, options.HostName, options.Port);
+            "Consumindo fila '{Queue}' em {Host}:{Port}. Canais operacionais: {Canais}.",
+            options.RequestQueueName, options.HostName, options.Port, string.Join(", ", operacionais));
 
         using var cancellationRegistration = stoppingToken.Register(() => connectionLost.TrySetResult());
         await connectionLost.Task;

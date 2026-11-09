@@ -1,4 +1,3 @@
 <Solution>
   <Project Path="EventoWebNotificacoes.csproj" />
-  <Project Path="external/BaileysCSharp/BaileysCSharp/BaileysCSharp.csproj" />
 </Solution>

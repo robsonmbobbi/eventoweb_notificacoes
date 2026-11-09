@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Options;
+
 namespace EventoWebNotificacoes;
 
 public interface INotificadorResolver
@@ -7,49 +9,28 @@ public interface INotificadorResolver
 
 public sealed class NotificadorResolver : INotificadorResolver
 {
-    private readonly ConfigStore _configStore;
+    private readonly CanaisOptions _canais;
+    private readonly NotificationWorkerOptions.EmailOptions _email;
     private readonly TemplateRenderer _renderer;
-    private readonly WhatsappConnectionService _whatsappConnectionService;
+    private readonly WhatsappCloudClient _whatsappClient;
 
     public NotificadorResolver(
-        ConfigStore configStore,
+        IOptions<CanaisOptions> canais,
+        IOptions<NotificationWorkerOptions.EmailOptions> email,
         TemplateRenderer renderer,
-        WhatsappConnectionService whatsappConnectionService)
+        WhatsappCloudClient whatsappClient)
     {
-        _configStore = configStore;
+        _canais = canais.Value;
+        _email = email.Value;
         _renderer = renderer;
-        _whatsappConnectionService = whatsappConnectionService;
+        _whatsappClient = whatsappClient;
     }
 
+    // A completude da configuração de cada canal habilitado já é garantida no start (ValidateOnStart).
     public INotificador Resolver(EnumMeioNotificacao meio) => meio switch
     {
-        EnumMeioNotificacao.EMail => ResolverEmail(),
-        EnumMeioNotificacao.WhatsApp => ResolverWhatsapp(),
+        EnumMeioNotificacao.EMail when _canais.Email => new NotificadorEmail(_renderer, _email),
+        EnumMeioNotificacao.WhatsApp when _canais.Whatsapp => new NotificadorWhatsapp(_whatsappClient),
         _ => throw new NotSupportedException($"Meio de notificação não configurado neste worker: {meio}")
     };
-
-    private INotificador ResolverEmail()
-    {
-        if (!_configStore.Canais.Email)
-            throw new NotSupportedException("Meio de notificação não configurado neste worker: EMail");
-
-        var email = _configStore.Email;
-        if (email is null ||
-            string.IsNullOrWhiteSpace(email.ApiUrl) ||
-            string.IsNullOrWhiteSpace(email.ApiKey) ||
-            string.IsNullOrWhiteSpace(email.FromAddress))
-        {
-            throw new NotSupportedException("Meio de notificação não configurado neste worker: EMail");
-        }
-
-        return new NotificadorEmail(_renderer, email);
-    }
-
-    private INotificador ResolverWhatsapp()
-    {
-        if (!_configStore.Canais.Whatsapp)
-            throw new NotSupportedException("Meio de notificação não configurado neste worker: WhatsApp");
-
-        return new NotificadorWhatsapp(_renderer, _whatsappConnectionService);
-    }
 }

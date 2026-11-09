@@ -1,36 +1,21 @@
 # eventoweb_notificacoes
 
 Worker que envia notificações (Email/WhatsApp) atuando como **servidor RPC do RabbitMQ**
-(padrão request/reply do RabbitMQ, com `ReplyTo`/`CorrelationId`), com uma **interface web
-de configuração** embutida no próprio processo.
+(padrão request/reply do RabbitMQ, com `ReplyTo`/`CorrelationId`).
 
 Quem chama via RPC é responsável por resolver o template (assunto/corpo) e as variáveis
-antes de publicar o pedido, e por persistir o status de envio no seu próprio banco — isso
-não mudou. O que mudou: o serviço agora tem persistência local própria (SQLite-like,
-embutida via LiteDB) para guardar a configuração de RabbitMQ/Email e o estado da sessão do
-WhatsApp, editável em runtime pela UI web, em vez de depender só de `appsettings.json`
-estático.
+antes de publicar o pedido, e por persistir o status de envio no seu próprio banco. O
+serviço não tem persistência local nem interface web: toda a configuração vem do
+`appsettings.json` (ou variáveis de ambiente) e é lida no boot.
 
-O envio de WhatsApp não usa mais uma API REST externa (Evolution API) — usa
-[BaileysCSharp](https://github.com/WhiskeySockets/BaileysCSharp), conectando diretamente
-no protocolo multi-device do WhatsApp Web via WebSocket, sem gateway intermediário.
+O envio de WhatsApp usa a **API oficial da Meta (WhatsApp Cloud API)**, chamada por HTTPS
+na Graph API. (Versões anteriores usavam BaileysCSharp, emulando o WhatsApp Web via QR Code.)
 
 ## Configuração
 
-O serviço só começa a consumir a fila do RabbitMQ quando: (1) a configuração do RabbitMQ
-está validada, **e** (2) todos os canais habilitados nesta instância (`Canais:Email` /
-`Canais:Whatsapp`, ver abaixo) também estão validados. Enquanto isso não acontece, o
-processo fica de pé servindo só a interface de configuração.
-
-**Primeira execução**: abra `http://localhost:<porta>/` (redireciona para `/admin.html`) e
-preencha RabbitMQ, Email e/ou escaneie o QR Code do WhatsApp por lá. Não é mais necessário
-editar `appsettings.json` à mão para isso.
-
-**`appsettings.json`** (não versionado) ainda existe, mas agora serve só de **seed**: na
-primeira execução, se a configuração salva (LiteDB) estiver vazia e a seção
-correspondente do `appsettings.json` estiver preenchida, ela é usada para popular o banco
-uma única vez. Depois disso, edições passam a ser feitas pela UI — reeditar
-`appsettings.json` não tem mais efeito.
+Tudo fica no **`appsettings.json`** (não versionado) ou em variáveis de ambiente equivalentes
+(ex.: `RabbitMq__HostName`, `Whatsapp__AccessToken`). A configuração é lida só no boot —
+**qualquer mudança exige reiniciar o processo**.
 
 ```json
 {
@@ -47,10 +32,11 @@ uma única vez. Depois disso, edições passam a ser feitas pela UI — reeditar
     "Email": { "ApiUrl": "...", "ApiKey": "...", "FromAddress": "..." }
   },
   "Whatsapp": {
-    "SessionName": "eventoweb"
-  },
-  "Storage": {
-    "ConfigDbPath": "./data/notificacoes-config.db"
+    "PhoneNumberId": "...",
+    "WabaId": "...",
+    "AccessToken": "...",
+    "ApiVersion": "v23.0",
+    "WebhookVerifyToken": "..."
   },
   "Canais": {
     "Email": true,
@@ -59,37 +45,26 @@ uma única vez. Depois disso, edições passam a ser feitas pela UI — reeditar
 }
 ```
 
-`Whatsapp:SessionName` e `Storage:ConfigDbPath` são exceção: continuam vindo só do
-`appsettings.json`/variáveis de ambiente, nunca da UI/LiteDB (são decisões de
-infraestrutura/deploy, não algo que se preenche num formulário). `Canais` **não** é
-exceção — segue o mesmo padrão de seed do RabbitMq/Email descrito acima (ver a seguir).
+O processo **falha ao subir**, com mensagem clara, se nenhum canal estiver habilitado ou se
+um canal habilitado estiver com a configuração incompleta (`Notification:Email` sem
+`ApiUrl`/`ApiKey`/`FromAddress`, ou `Whatsapp` sem `PhoneNumberId`/`WabaId`/`AccessToken`/
+`ApiVersion`). A seção de um canal desabilitado pode ficar vazia.
+
+Com WhatsApp habilitado, o consumo da fila só começa depois que as credenciais forem
+validadas na Graph API (feito automaticamente no boot, com retry). A conexão com o RabbitMQ
+tem seu próprio laço de reconexão.
 
 ### Canais (`Canais:Email` / `Canais:Whatsapp`)
 
-Controla quais canais este processo serve. Editável pela seção "Canais habilitados" em
-`/admin.html` (`GET`/`PUT /api/config/canais`) — **a mudança tem efeito imediato, sem
-precisar reiniciar o processo**: desmarcar WhatsApp derruba a conexão/socket do
-BaileysCSharp na hora; marcar volta a tentar conectar na hora. A sessão do WhatsApp
-(`creds.json`) é preservada ao desabilitar — religar reconecta sem pedir um novo QR Code;
-só o logout manual ("Sair / trocar número") ou um logout remoto pelo próprio WhatsApp
-apagam as credenciais. Enquanto o canal está desabilitado, o status mostrado é
-`Desabilitado` (distinto de `Desconectado`, que significa "tentando reconectar").
-
-`appsettings.json`'s `Canais` (default `{ "Email": true, "Whatsapp": true }` se a seção
-não existir) serve só de **seed no primeiro boot** — depois disso, edições passam a ser
-feitas pela UI, igual RabbitMq/Email. Se os dois estiverem `false` nesse seed inicial, o
-processo falha ao subir com uma mensagem de erro clara; depois do primeiro boot, tentar
-desabilitar os dois pela UI é rejeitado com `400` (pelo menos um precisa continuar
-habilitado).
+Controla quais canais este processo serve (default `true` para ambos se a seção não existir).
 
 Um pedido de notificação para um canal desabilitado nesta instância não derruba o
 processo: a resposta RPC volta com `Sucesso: false` e
 `MensagemErro: "Meio de notificação não configurado neste worker: ..."`.
 
-**Deploy dividido por máquina** (ex.: WhatsApp numa máquina com mais memória para o socket
-do BaileysCSharp, Email numa máquina com IP fixo para o allowlist do provedor): suba cada
-instância com o `Canais` inicial já correto (seed) ou ajuste pela UI logo após o primeiro
-boot, e configure `RabbitMq:RequestQueueName` com uma fila própria por máquina, por
+**Deploy dividido por máquina** (ex.: Email numa máquina com IP fixo para o allowlist do
+provedor): suba cada
+instância com o `Canais` correto no seu `appsettings.json` e configure `RabbitMq:RequestQueueName` com uma fila própria por máquina, por
 exemplo:
 
 - Máquina WhatsApp: canal Email desabilitado, `RabbitMq:RequestQueueName=notificacoes.enviar.whatsapp`.
@@ -104,40 +79,80 @@ de quem publica** (fora deste repositório) — este serviço não declara topol
 esse roteamento entre filas; ele só se defende de receber a mensagem errada respondendo
 com erro via RPC, como descrito acima.
 
-### Volumes persistentes (deploy)
+## WhatsApp (Cloud API da Meta)
 
-Dois caminhos em disco precisam sobreviver a um redeploy/restart do container, ou a
-configuração/sessão se perde:
+### Cadastro na Meta (uma vez)
 
-- `Storage:ConfigDbPath` (padrão `./data/notificacoes-config.db`) — configuração de
-  RabbitMQ/Email salva pela UI.
-- A pasta de sessão do WhatsApp, calculada pelo próprio BaileysCSharp como
-  `<diretório do executável>/<Whatsapp:SessionName>/` (contém `creds.json` e as chaves de
-  sessão). O caminho exato é logado no início (`Sessão do WhatsApp armazenada em ...`).
+1. **Portfólio empresarial** em business.facebook.com.
+2. **App** em developers.facebook.com → *Create App* → tipo **Business** → adicionar o
+   produto **WhatsApp**. Já vem uma WABA de teste com um **número de teste** que envia para
+   até 5 destinatários cadastrados na tela *API Setup* — use para desenvolvimento.
+3. **Número de produção** (WhatsApp Manager → Números de telefone → Adicionar): o número não
+   pode estar ativo no app WhatsApp/WhatsApp Business e precisa receber SMS/ligação para
+   verificação. O **nome de exibição** passa por revisão da Meta.
+4. **Forma de pagamento** no WhatsApp Manager (cobrança por template entregue — ver
+   developers.facebook.com/docs/whatsapp/pricing).
+5. **Verificação da empresa** é opcional para até 250 destinatários únicos/24h (limite de
+   portfólio não verificado). Só é necessária para volumes maiores.
+6. **Token permanente**: Configurações do negócio → Usuários → **Usuários do sistema** →
+   criar usuário admin → atribuir o App e a WABA (controle total) → *Gerar token* com
+   `whatsapp_business_messaging` e `whatsapp_business_management`, validade "Nunca". O
+   token temporário da tela *API Setup* expira em 24h.
+7. Copiar **Phone Number ID** e **WABA ID** (App → WhatsApp → API Setup) e preencher, junto
+   com o token, na seção `Whatsapp` do `appsettings.json`.
+8. **Templates** (WhatsApp Manager → Modelos de mensagem): categoria **Utilidade**, idioma
+   `pt_BR`, **variáveis nomeadas** (`{{nome_participante}}`) com os mesmos nomes das chaves
+   do `dadosJson`. Para anexo, cabeçalho do tipo **Documento** (ou Imagem/Vídeo). Evite
+   linguagem promocional, senão a Meta reclassifica como Marketing.
+9. Só envie para quem consentiu (ex.: checkbox na inscrição) — bloqueios e denúncias
+   derrubam a *quality rating* do número, registrada no log ao validar no boot.
 
-Perder o primeiro derruba toda a configuração salva; perder o segundo exige escanear o QR
-de novo.
+### Como o envio funciona
 
-## WhatsApp (BaileysCSharp)
+- Mensagens iniciadas pela empresa só podem ser **templates aprovados**. O pedido RPC
+  informa `templateWhatsapp` (+ `idiomaTemplateWhatsapp`, padrão `pt_BR`);
+  `templateConteudo` não é usado nesse canal.
+- O worker consulta o template na Graph API (cache de 10 min) e preenche as variáveis do
+  cabeçalho/corpo com as chaves **de primeiro nível** de `dadosJson`. Templates com
+  parâmetros posicionais (`{{1}}`, `{{2}}`) usam as chaves `"1"`, `"2"`. Variável faltando →
+  erro antes de chamar a Meta. Quebras de linha/tabs nos valores viram espaço (a Meta as
+  rejeita em parâmetros).
+- **Anexo**: no máximo 1, e só com template de cabeçalho de mídia (o arquivo é enviado via
+  upload de mídia e usado no cabeçalho). Template com cabeçalho de mídia sem anexo, anexo
+  com template sem cabeçalho de mídia ou 2+ anexos → erro.
+- `Sucesso: true` significa que a Meta **aceitou** a mensagem. Falhas de entrega posteriores
+  (ex.: número sem WhatsApp) não voltam pela RPC — só aparecem no log, via webhook de status
+  (ver abaixo). O envio também loga o `wa_id` devolvido pela Meta e avisa quando ele difere
+  do número enviado (nono dígito BR).
+- Credenciais são validadas automaticamente no boot (com retry), então um restart volta a
+  consumir a fila sem intervenção. Não há limite diário próprio: o teto de envios é o da Meta
+  (250 destinatários únicos/24h para portfólio não verificado).
+- Escopo é de **instância única** — um número de WhatsApp para o processo todo.
 
-- A biblioteca é consumida como **git submodule** em `external/BaileysCSharp`, fixada no
-  commit `0a3600e026d6fde2fb760d52f6b11e2169a32dd1` (não há pacote NuGet nem releases) —
-  atualizar é uma ação deliberada (`cd external/BaileysCSharp && git checkout
-  <novo-commit> && cd ../.. && git add external/BaileysCSharp`).
-- BaileysCSharp fixa uma versão do protocolo WhatsApp Web que fica desatualizada em poucos
-  meses (o WhatsApp passa a rejeitar o handshake com `failure reason='405'`). O worker
-  busca a versão vigente automaticamente na inicialização, do arquivo mantido pelo projeto
-  Baileys (JS) em `raw.githubusercontent.com/WhiskeySockets/Baileys/master/src/Defaults/baileys-version.json`;
-  se a busca falhar (sem internet, GitHub fora do ar), cai para a versão padrão da lib.
-- Só existe pareamento por **QR Code** (a lib não implementa pairing-code por telefone). O
-  QR aparece tanto no console (ASCII) quanto na página `/admin.html` (imagem), enquanto o
-  status estiver `AguardandoQrCode`.
-- Se a sessão for invalidada pelo próprio WhatsApp (logout remoto), o serviço descarta as
-  credenciais salvas automaticamente e gera um QR novo, sem precisar reiniciar o processo.
-  O botão "Sair / trocar número" na UI faz o mesmo manualmente.
-- Escopo é de **instância única** — uma sessão de WhatsApp para o processo todo, não por
-  evento/organizador (diferente do backend legado `eventoweb_comum_back`, que é
-  multi-tenant via a tabela `configuracoes_whatsapp`).
+Erros comuns da Meta aparecem traduzidos em `mensagemErro`: `190` token inválido/expirado,
+`132001` template inexistente no idioma, `132000` quantidade de parâmetros errada,
+`131047` fora da janela de 24h, `131056`/`130429` limite de taxa.
+
+### Webhook de status
+
+A Cloud API não permite consultar o status de uma mensagem pelo `wamid`; enviada, entregue,
+lida ou falha só chegam por webhook. O worker expõe `GET/POST /webhook/whatsapp` e registra
+cada status no log (falhas em Warning, com `code`, `title` e `details`).
+
+1. Defina um **verify token** qualquer em `Whatsapp:WebhookVerifyToken` no `appsettings.json`.
+2. Sem endereço público (desenvolvimento), abra um túnel:
+   `cloudflared tunnel --url http://localhost:<porta>` → gera `https://xxxx.trycloudflare.com`
+   (a URL muda a cada execução).
+3. App da Meta → WhatsApp → **Configuration** → Webhook: *Callback URL*
+   `https://<host>/webhook/whatsapp` e o mesmo verify token → *Verify and save*.
+4. Em *Webhook fields*, assine **messages**.
+
+Códigos de falha comuns: `131049` template de marketing barrado pela Meta (use Utilidade),
+`131026` destinatário sem WhatsApp/versão antiga/bloqueou, `131042` problema de pagamento
+da WABA, `131030` destinatário fora da lista do número de teste.
+
+A assinatura `X-Hub-Signature-256` ainda não é validada (exigiria o App Secret); o endpoint
+só registra logs, então o risco é apenas de logs falsos.
 
 ## Contrato RPC
 
@@ -150,8 +165,13 @@ Requisição (`NotificacaoRequest`), publicada na fila `RabbitMq:RequestQueueNam
   "meio": "EMail | WhatsApp",
   "destinatario": "email ou telefone",
   "templateAssunto": "usado apenas para EMail",
-  "templateConteudo": "corpo do template (Scriban)",
-  "dadosJson": "{ \"variavel\": \"valor\" }"
+  "templateConteudo": "corpo do template (Scriban) — usado apenas para EMail",
+  "dadosJson": "{ \"variavel\": \"valor\" }",
+  "templateWhatsapp": "nome do template aprovado na Meta — obrigatório para WhatsApp",
+  "idiomaTemplateWhatsapp": "pt_BR",
+  "anexos": [
+    { "nomeArquivo": "comprovante.pdf", "mimeType": "application/pdf", "conteudo": "<base64>" }
+  ]
 }
 ```
 
@@ -206,23 +226,21 @@ reprocessamento do mesmo pedido — e, consequentemente, reenvio duplicado.
 Isso é deliberado, para não introduzir persistência de dados de negócio no
 servidor (que continua sendo responsabilidade do cliente).
 
-Se uma notificação de WhatsApp for pedida enquanto a sessão não está `Conectado`, o envio
-falha rápido (`Sucesso: false`) em vez de enfileirar/esperar — o chamador já é responsável
-por retry, então não há uma segunda fila de retry escondida aqui.
+Se uma notificação de WhatsApp falhar (Meta indisponível, limite de taxa etc.), o
+envio falha rápido (`Sucesso: false`) em vez de enfileirar/esperar — o chamador já é
+responsável por retry, então não há uma segunda fila de retry escondida aqui.
 
 ## Rodando localmente
 
-Requer RabbitMQ acessível (local ou remoto). Como este é o primeiro clone com o submodule:
+Requer RabbitMQ acessível (local ou remoto).
 
 ```bash
-git submodule update --init --recursive
 dotnet run
 ```
 
-Os logs indicam a porta em uso (`Now listening on: https://localhost:5001`, por exemplo).
-Abra essa URL no navegador — ela redireciona para `/admin.html` — e configure RabbitMQ,
-Email e/ou WhatsApp por ali. O worker só passa a consumir `notificacoes.enviar` depois que
-o banner do topo da página mostrar "Pronto".
+Preencha antes o `appsettings.json` (ver [Configuração](#configuração)). O log
+`Consumindo fila '<fila>' em <host>:<porta>` indica que o worker está pronto. A porta HTTP
+(`Now listening on: ...`) só é usada pelo webhook do WhatsApp.
 
 A fila (`RabbitMq:RequestQueueName`) é criada/gerenciada pela infra — este serviço não
 declara topologia, apenas consome; se a fila ainda não existir, o consumo falha e o
